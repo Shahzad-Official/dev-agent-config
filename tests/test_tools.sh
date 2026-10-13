@@ -131,6 +131,8 @@ case "$preflight_output" in *'installation can proceed'*) ;; *) exit 1 ;; esac
 home="$(new_home preflight-no-venv)"
 if FAKE_VENV_MODE=no-venv run_tool "$home" install --dry-run >"$home/out" 2>&1; then echo 'Missing venv was accepted' >&2; exit 1; fi
 grep -q 'python3-venv\|includes venv' "$home/out"
+grep -q 'Then retry:' "$home/out"
+grep -q 'No files were downloaded or installed' "$home/out"
 [ ! -e "$(tool_dir "$home")" ]
 
 home="$(new_home preflight-no-pip)"

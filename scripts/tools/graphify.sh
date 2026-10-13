@@ -160,10 +160,20 @@ prerequisite_hint() {
     command='brew install python'
   fi
   if [ -n "$command" ]; then
-    say "Required prerequisite command: $command"
-    say 'Review and run it yourself with explicit approval; this manager will not run privileged package commands.'
+    say 'Install the missing prerequisite with:'
+    say "  $command"
+    say ''
+    say 'Then retry:'
+    say "  $ROOT/scripts/tools.sh graphify install"
+    say ''
+    say 'No files were downloaded or installed. The manager does not run privileged package commands.'
   else
-    say 'Install a Python 3.10+ distribution that includes venv and ensurepip, then retry.'
+    say 'Install a Python 3.10+ distribution that includes venv and ensurepip.'
+    say ''
+    say 'Then retry:'
+    say "  $ROOT/scripts/tools.sh graphify install"
+    say ''
+    say 'No files were downloaded or installed.'
   fi
 }
 
