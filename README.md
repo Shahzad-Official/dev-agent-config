@@ -96,7 +96,8 @@ executed during installation.
 
 Graphify is separate from instructions and skills. Managing it never runs
 `graphify install`, edits `AGENTS.md`, registers hooks or MCP, or starts a service.
-Preview and install the pinned release in a private virtual environment:
+Preview and install the latest stable compatible release in a private virtual
+environment:
 
 ```bash
 ./scripts/tools.sh graphify install --dry-run
@@ -104,20 +105,43 @@ Preview and install the pinned release in a private virtual environment:
 ./scripts/tools.sh graphify verify
 ```
 
-This installs the official `graphifyy==0.9.88` package under
-`${XDG_DATA_HOME:-$HOME/.local/share}/dev-agent-config/tools/graphify/0.9.88`.
-Python 3.10+ with `venv` and pip is required; the script never uses `sudo` or
-system Python package locations. It downloads the official universal wheel and
-checks SHA-256
+Fresh installation resolves the latest non-prerelease release and universal wheel
+from the authoritative PyPI JSON API. If metadata lookup is unavailable, it falls
+back safely to the retained `graphifyy==0.9.88` pin under
+`${XDG_DATA_HOME:-$HOME/.local/share}/dev-agent-config/tools/graphify/VERSION`.
+It downloads the selected official wheel and verifies its PyPI SHA-256 before
+installation. The retained 0.9.88 wheel SHA-256 is
 `04e5a44c0ff94554315e03d39d8eccfddb2850b77837ede23d75f0f63dc4e66d`
-before installation. Package source and license metadata live in
+and remains the trusted fallback. Package source and license metadata live in
 `tools/graphify/tool.conf`.
+
+Installation preflight requires Python 3.10+ and tests `venv` before any download
+or target change. System pip is not required: the new environment's pip is used,
+and `ensurepip` is attempted inside that environment when necessary. If the OS
+Python lacks venv/ensurepip, the manager detects common macOS/Linux package
+managers and prints an appropriate prerequisite command. It never runs `sudo`,
+`apt`, `dnf`, `apk`, `pacman`, or Homebrew itself.
 
 The environment's resolved versions are recorded in `dependencies.txt` after
 installation. The Graphify wheel is exactly pinned and hash-verified, but its
 transitive dependencies are resolved from Graphify's declared constraints and
 are not fully hash-locked. Review `dependencies.txt` when reproducibility or
 supply-chain policy requires a complete dependency lock.
+
+Routine install and verify operations never upgrade a healthy installation.
+Update checking is read-only, and upgrades must be explicit:
+
+```bash
+./scripts/tools.sh graphify check-update
+./scripts/tools.sh graphify upgrade --dry-run
+./scripts/tools.sh graphify upgrade
+```
+
+The manager reports current and latest stable versions, rejects prereleases and
+yanked/unsupported wheel artifacts, verifies the selected wheel, and records its
+release URL, digest, and resolved dependencies. A new release is staged and
+verified before it becomes current. Failed upgrades leave the working version
+selected, while successful upgrades can be rolled back with the printed command.
 
 Indexing is explicit and code-only:
 
@@ -159,8 +183,9 @@ Rollback refuses mismatched manifests, changed install ownership, symlinked path
 or an occupied restore destination. Tool rollback is intentionally separate from
 the instruction installer's rollback.
 
-On Debian, the distribution's `python3-venv` package may be needed. The manager
-reports the missing prerequisite but never invokes `apt` or requests `sudo`.
+On Debian and Ubuntu, the distribution's `python3-venv` package may be needed.
+The dry run performs the same preflight and reports whether installation can
+proceed; if not, it prints the suggested command for the user to review and run.
 
 ## Simple benchmark procedure
 
