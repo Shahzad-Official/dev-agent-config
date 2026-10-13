@@ -18,7 +18,7 @@ home="$SANDBOX/missing"
 mkdir -p "$home"
 HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
 HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/missing.json"
-grep -q '"name":"Codex","cli":"codex","installed":false,"version":"unavailable","configured":false' "$SANDBOX/missing.json"
+grep -q '"name":"Codex","cli":"codex","installed":false,"version":"unavailable","vscode_extension":.*"configured":false' "$SANDBOX/missing.json"
 
 # A healthy existing configuration remains configured even without its CLI.
 home="$SANDBOX/configured"
@@ -52,11 +52,47 @@ printf '#!/bin/sh\nmkdir -p "$HOME/version-side-effect"\nprintf "opencode 4.5.6\
 chmod +x "$bin/opencode"
 HOME="$home" PATH="$bin:$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
 HOME="$home" PATH="$bin:$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/mixed.json"
-grep -q '"name":"Codex","cli":"codex","installed":true,"version":"codex 1.2.3","configured":true' "$SANDBOX/mixed.json"
-grep -q '"name":"Gemini CLI","cli":"gemini","installed":false,"version":"unavailable","configured":true' "$SANDBOX/mixed.json"
-grep -q '"name":"OpenCode","cli":"opencode","installed":true,"version":"opencode 4.5.6","configured":false' "$SANDBOX/mixed.json"
+grep -q '"name":"Codex","cli":"codex","installed":true,"version":"codex 1.2.3","vscode_extension":.*"configured":true' "$SANDBOX/mixed.json"
+grep -q '"name":"Gemini CLI","cli":"gemini","installed":false,"version":"unavailable","vscode_extension":.*"configured":true' "$SANDBOX/mixed.json"
+grep -q '"name":"OpenCode","cli":"opencode","installed":true,"version":"opencode 4.5.6","vscode_extension":.*"configured":false' "$SANDBOX/mixed.json"
 grep -q '"runtime_skill_activation":"unverified"' "$SANDBOX/mixed.json"
 [ ! -e "$home/version-side-effect" ]
 if command -v python3 >/dev/null 2>&1; then python3 -m json.tool "$SANDBOX/mixed.json" >/dev/null; fi
 
-echo 'PASS verify: missing CLIs, existing configs, broken links, mixed installations, JSON'
+# Codex CLI and VS Code extension installation are independent signals.
+home="$SANDBOX/discovery-home"
+mkdir -p "$home"
+HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
+
+bin="$SANDBOX/cli-only-bin"
+make_cli "$bin" codex 7.0.0
+HOME="$home" PATH="$bin:$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/cli-only.json"
+grep -q '"name":"Codex","cli":"codex","installed":true' "$SANDBOX/cli-only.json"
+grep -q '"id":"openai.chatgpt","installation":"not-detected","listed":false,"directory_present":false' "$SANDBOX/cli-only.json"
+
+bin="$SANDBOX/extension-only-bin"
+mkdir -p "$bin"
+printf '#!/bin/sh\nprintf "openai.chatgpt@1.2.3\\n"\n' > "$bin/code"
+chmod +x "$bin/code"
+HOME="$home" PATH="$bin:$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/extension-only.json"
+grep -q '"name":"Codex","cli":"codex","installed":false' "$SANDBOX/extension-only.json"
+grep -q '"id":"openai.chatgpt","installation":"confirmed","listed":true,"directory_present":false,"active":"unverified"' "$SANDBOX/extension-only.json"
+
+bin="$SANDBOX/both-bin"
+make_cli "$bin" codex 7.0.0
+printf '#!/bin/sh\nprintf "openai.chatgpt@1.2.3\\n"\n' > "$bin/code"
+chmod +x "$bin/code"
+HOME="$home" PATH="$bin:$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/both.json"
+grep -q '"name":"Codex","cli":"codex","installed":true' "$SANDBOX/both.json"
+grep -q '"id":"openai.chatgpt","installation":"confirmed","listed":true' "$SANDBOX/both.json"
+
+HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/neither.json"
+grep -q '"name":"Codex","cli":"codex","installed":false' "$SANDBOX/neither.json"
+grep -q '"id":"openai.chatgpt","installation":"not-detected","listed":false,"directory_present":false' "$SANDBOX/neither.json"
+
+# Directory fallback is reported as presence only, never as active or CLI-listed.
+mkdir -p "$home/.vscode/extensions/openai.chatgpt-9.9.9"
+HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/directory-only.json"
+grep -q '"id":"openai.chatgpt","installation":"directory-only","listed":false,"directory_present":true,"active":"unverified"' "$SANDBOX/directory-only.json"
+
+echo 'PASS verify: configs, broken links, mixed installs, CLI/extension discovery, JSON'

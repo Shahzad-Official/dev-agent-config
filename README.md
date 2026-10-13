@@ -74,10 +74,12 @@ while installed because skill links point into it.
 ```
 
 Verification reports the operating system, CLI installation and safe `--version`
-result, configuration presence, instruction and skill health, and unsupported
-adapters. CLI presence and configuration presence are independent: an old config
-directory is not proof that an agent is installed. Filesystem verification does not
-prove that an agent activated Ponytail, so runtime activation remains `unverified`.
+result, VS Code extension discovery, configuration presence, instruction and skill
+health, and unsupported adapters. CLI, VS Code extension, and configuration presence
+are independent. When a VS Code CLI is available, verification uses its read-only
+extension list; known extension directories are a presence-only fallback and never
+proof that an extension is active. Filesystem verification does not prove that an
+agent activated Ponytail, so runtime activation remains `unverified`.
 
 ## Ponytail provenance
 

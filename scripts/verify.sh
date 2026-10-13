@@ -13,6 +13,8 @@ FAILED=0
 FIRST_AGENT=1
 FIRST_UNSUPPORTED=1
 OS="$(uname -s 2>/dev/null || printf unknown)"
+VERIFY_TMP="$(mktemp -d)"
+trap 'rm -rf "$VERIFY_TMP"' EXIT
 
 bool() { [ "$1" -eq 1 ] && printf true || printf false; }
 json_string() {
@@ -72,15 +74,83 @@ safe_version() {
   [ -n "$line" ] && printf '%s' "$line" || printf unavailable
 }
 
+extension_directory_present() {
+  local extension_id="$1" directory entry
+  [ -n "$extension_id" ] || { printf false; return; }
+  for directory in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" "$HOME/.vscode-oss/extensions" "$HOME/.var/app/com.visualstudio.code/data/vscode/extensions"; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] || continue
+    for entry in "$directory/$extension_id" "$directory/$extension_id"-*; do
+      if [ -d "$entry" ] && [ ! -L "$entry" ]; then printf true; return; fi
+    done
+  done
+  printf false
+}
+
+discover_vscode_extensions() {
+  local candidate directory output error pid count
+  VSCODE_CLI=''
+  VSCODE_LIST_STATUS=unavailable
+  VSCODE_LIST="$VERIFY_TMP/vscode-extensions"
+  : > "$VSCODE_LIST"
+  for candidate in code code-insiders codium; do
+    VSCODE_CLI="$(command -v "$candidate" 2>/dev/null || true)"
+    [ -z "$VSCODE_CLI" ] || break
+  done
+  [ -n "$VSCODE_CLI" ] || return
+
+  directory=''
+  for candidate in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" "$HOME/.vscode-oss/extensions" "$HOME/.var/app/com.visualstudio.code/data/vscode/extensions"; do
+    if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then directory="$candidate"; break; fi
+  done
+  output="$VERIFY_TMP/vscode-stdout"
+  error="$VERIFY_TMP/vscode-stderr"
+  (
+    cd "$VERIFY_TMP" || exit 1
+    if [ -n "$directory" ]; then
+      HOME="$VERIFY_TMP" XDG_CONFIG_HOME="$VERIFY_TMP/config" XDG_DATA_HOME="$VERIFY_TMP/data" XDG_CACHE_HOME="$VERIFY_TMP/cache" \
+        "$VSCODE_CLI" --list-extensions --show-versions --extensions-dir "$directory" </dev/null >"$output" 2>"$error"
+    else
+      HOME="$VERIFY_TMP" XDG_CONFIG_HOME="$VERIFY_TMP/config" XDG_DATA_HOME="$VERIFY_TMP/data" XDG_CACHE_HOME="$VERIFY_TMP/cache" \
+        "$VSCODE_CLI" --list-extensions --show-versions </dev/null >"$output" 2>"$error"
+    fi
+  ) &
+  pid=$!
+  count=0
+  while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 20 ]; do sleep 0.1; count=$((count + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    VSCODE_LIST_STATUS=timeout
+    return
+  fi
+  if wait "$pid" 2>/dev/null; then
+    tr '[:upper:]' '[:lower:]' < "$output" | sed 's/@.*$//' > "$VSCODE_LIST"
+    VSCODE_LIST_STATUS=available
+  else
+    VSCODE_LIST_STATUS=error
+  fi
+}
+
+extension_listed() {
+  [ "$VSCODE_LIST_STATUS" = available ] && grep -qFx "$1" "$VSCODE_LIST"
+}
+
 emit_agent() {
-  local name="$1" command_name="$2" config_dir="$3" instruction="$4" skill="$5"
-  local executable='' installed=0 configured=0 version=unavailable instructions skills skill_target health
+  local name="$1" command_name="$2" config_dir="$3" instruction="$4" skill="$5" extension_id="$6"
+  local executable='' installed=0 configured=0 version=unavailable instructions skills skill_target health extension_listed_value=false extension_directory=false extension_installation=not-detected
   executable="$(command -v "$command_name" 2>/dev/null || true)"
   if [ -n "$executable" ]; then installed=1; version="$(safe_version "$executable")"; fi
   if [ -d "$config_dir" ] || [ -e "$instruction" ] || [ -L "$instruction" ]; then configured=1; fi
   instructions="$(instruction_status "$instruction")"
   skills="$(skill_status "$skill")"
   skill_target="$(skill_link_target "$skill")"
+  if [ -n "$extension_id" ]; then
+    if extension_listed "$extension_id"; then extension_listed_value=true; fi
+    extension_directory="$(extension_directory_present "$extension_id")"
+    if [ "$extension_listed_value" = true ]; then extension_installation=confirmed
+    elif [ "$extension_directory" = true ]; then extension_installation=directory-only
+    fi
+  fi
   if [ "$configured" -eq 0 ]; then
     health=not-configured
   elif [ "$instructions" = healthy ] && [ "$skills" = healthy ]; then
@@ -93,14 +163,20 @@ emit_agent() {
   if [ "$JSON" -eq 1 ]; then
     [ "$FIRST_AGENT" -eq 1 ] || printf ','
     FIRST_AGENT=0
-    printf '\n    {"name":"%s","cli":"%s","installed":%s,"version":"%s","configured":%s,"configuration_health":"%s","instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"},"runtime_skill_activation":"unverified"}' \
+    printf '\n    {"name":"%s","cli":"%s","installed":%s,"version":"%s","vscode_extension":{"id":"%s","installation":"%s","listed":%s,"directory_present":%s,"active":"unverified"},"configured":%s,"configuration_health":"%s","instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"},"runtime_skill_activation":"unverified"}' \
       "$(json_string "$name")" "$(json_string "$command_name")" "$(bool "$installed")" "$(json_string "$version")" \
-      "$(bool "$configured")" "$health" "$(json_string "$instruction")" "$instructions" "$(json_string "$skill")" "$skills" "$(json_string "$skill_target")"
+      "$(json_string "$extension_id")" "$extension_installation" "$extension_listed_value" "$extension_directory" "$(bool "$configured")" "$health" \
+      "$(json_string "$instruction")" "$instructions" "$(json_string "$skill")" "$skills" "$(json_string "$skill_target")"
   else
     printf '\n%s\n' "$name"
     printf '  installed: %s' "$(bool "$installed")"
     if [ "$installed" -eq 1 ]; then printf ' (%s; %s)' "$executable" "$version"; fi
     printf '\n  configured: %s\n' "$(bool "$configured")"
+    if [ -n "$extension_id" ]; then
+      printf '  VS Code extension: %s installation=%s listed=%s directory_present=%s active=unverified\n' "$extension_id" "$extension_installation" "$extension_listed_value" "$extension_directory"
+    else
+      printf '  VS Code extension: not mapped\n'
+    fi
     printf '  configuration health: %s\n' "$health"
     printf '  instructions: %s [%s]\n' "$instruction" "$instructions"
     printf '  skill: %s' "$skill"
@@ -130,16 +206,19 @@ shared_skill="$HOME/.agents/skills/ponytail"
 shared_instruction_status="$(instruction_status "$shared_instruction")"
 shared_skill_status="$(skill_status "$shared_skill")"
 shared_skill_target="$(skill_link_target "$shared_skill")"
+discover_vscode_extensions
 if [ "$shared_instruction_status" != healthy ] || [ "$shared_skill_status" != healthy ]; then FAILED=1; fi
 
 if [ "$JSON" -eq 1 ]; then
   printf '{\n  "operating_system":"%s",\n' "$(json_string "$OS")"
+  printf '  "vscode":{"cli_path":"%s","extension_list_status":"%s"},\n' "$(json_string "$VSCODE_CLI")" "$VSCODE_LIST_STATUS"
   printf '  "shared":{"instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"}},\n' \
     "$(json_string "$shared_instruction")" "$shared_instruction_status" "$(json_string "$shared_skill")" "$shared_skill_status" "$(json_string "$shared_skill_target")"
   printf '  "agents":['
 else
   printf 'dev-agent-config verification\n'
   printf 'Operating system: %s\n' "$OS"
+  if [ -n "$VSCODE_CLI" ]; then printf 'VS Code CLI: %s (extension list: %s)\n' "$VSCODE_CLI" "$VSCODE_LIST_STATUS"; else printf 'VS Code CLI: not found\n'; fi
   printf '\nShared configuration\n'
   printf '  instructions: %s [%s]\n' "$shared_instruction" "$shared_instruction_status"
   printf '  skill: %s' "$shared_skill"
@@ -147,10 +226,10 @@ else
   printf ' [%s]\n' "$shared_skill_status"
 fi
 
-emit_agent Codex codex "$HOME/.codex" "$HOME/.codex/AGENTS.md" "$shared_skill"
-emit_agent 'Claude Code' claude "$HOME/.claude" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/skills/ponytail"
-emit_agent 'Gemini CLI' gemini "$HOME/.gemini" "$HOME/.gemini/GEMINI.md" "$HOME/.gemini/skills/ponytail"
-emit_agent OpenCode opencode "$HOME/.config/opencode" "$HOME/.config/opencode/AGENTS.md" "$HOME/.config/opencode/skills/ponytail"
+emit_agent Codex codex "$HOME/.codex" "$HOME/.codex/AGENTS.md" "$shared_skill" openai.chatgpt
+emit_agent 'Claude Code' claude "$HOME/.claude" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/skills/ponytail" anthropic.claude-code
+emit_agent 'Gemini CLI' gemini "$HOME/.gemini" "$HOME/.gemini/GEMINI.md" "$HOME/.gemini/skills/ponytail" google.geminicodeassist
+emit_agent OpenCode opencode "$HOME/.config/opencode" "$HOME/.config/opencode/AGENTS.md" "$HOME/.config/opencode/skills/ponytail" ''
 
 if [ "$JSON" -eq 1 ]; then
   printf '\n  ],\n  "unsupported":['
