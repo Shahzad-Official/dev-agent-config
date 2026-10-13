@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SANDBOX="$(mktemp -d)"
+SYSTEM_PATH='/usr/bin:/bin'
 trap 'rm -rf "$SANDBOX"' EXIT
 
 new_home() {
@@ -23,7 +24,7 @@ HOME="$home" "$ROOT/scripts/install.sh" >/dev/null
 for file in "$home/AGENTS.md" "$home/.codex/AGENTS.md" "$home/.claude/CLAUDE.md" "$home/.gemini/GEMINI.md" "$home/.config/opencode/AGENTS.md"; do
   assert_contains "$file" 'Preserve established architecture'
 done
-HOME="$home" "$ROOT/scripts/verify.sh" >/dev/null
+HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" >/dev/null
 
 # Merge preserves existing instructions and an existing same-name skill.
 home="$(new_home merge)"

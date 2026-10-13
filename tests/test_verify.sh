@@ -76,7 +76,7 @@ printf '#!/bin/sh\nprintf "openai.chatgpt@1.2.3\\n"\n' > "$bin/code"
 chmod +x "$bin/code"
 HOME="$home" PATH="$bin:$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/extension-only.json"
 grep -q '"name":"Codex","cli":"codex","installed":false' "$SANDBOX/extension-only.json"
-grep -q '"id":"openai.chatgpt","installation":"confirmed","listed":true,"directory_present":false,"active":"unverified"' "$SANDBOX/extension-only.json"
+grep -q '"id":"openai.chatgpt","installation":"confirmed","listed":true,"directory_present":false.*"active":"unverified"' "$SANDBOX/extension-only.json"
 
 bin="$SANDBOX/both-bin"
 make_cli "$bin" codex 7.0.0
@@ -93,6 +93,32 @@ grep -q '"id":"openai.chatgpt","installation":"not-detected","listed":false,"dir
 # Directory fallback is reported as presence only, never as active or CLI-listed.
 mkdir -p "$home/.vscode/extensions/openai.chatgpt-9.9.9"
 HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/directory-only.json"
-grep -q '"id":"openai.chatgpt","installation":"directory-only","listed":false,"directory_present":true,"active":"unverified"' "$SANDBOX/directory-only.json"
+grep -q '"id":"openai.chatgpt","installation":"directory-only","listed":false,"directory_present":true,"directory_scope":"local-vscode".*"active":"unverified"' "$SANDBOX/directory-only.json"
 
-echo 'PASS verify: configs, broken links, mixed installs, CLI/extension discovery, JSON'
+# Remote SSH, WSL, and Dev Container servers use the remote VS Code Server tree.
+remote_home="$SANDBOX/remote-home"
+mkdir -p "$remote_home/.vscode-server/extensions/openai.chatgpt-3.0.0"
+HOME="$remote_home" PATH="$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
+HOME="$remote_home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/remote.json"
+grep -q '"id":"openai.chatgpt","installation":"directory-only","listed":false,"directory_present":true,"directory_scope":"remote-vscode"' "$SANDBOX/remote.json"
+grep -q '"directory_path":".*\.vscode-server/extensions/openai.chatgpt-3.0.0"' "$SANDBOX/remote.json"
+
+# Explicit remote agent folders are supported, while invalid and symlinked roots are ignored.
+agent_home="$SANDBOX/agent-home"
+agent_folder="$SANDBOX/custom-vscode-agent"
+mkdir -p "$agent_home" "$agent_folder/extensions/openai.chatgpt-4.0.0"
+HOME="$agent_home" VSCODE_AGENT_FOLDER="$agent_folder" PATH="$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
+HOME="$agent_home" VSCODE_AGENT_FOLDER="$agent_folder" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/agent-folder.json"
+grep -q '"directory_scope":"remote-agent"' "$SANDBOX/agent-folder.json"
+
+invalid_home="$SANDBOX/invalid-home"
+foreign="$SANDBOX/foreign-extensions"
+mkdir -p "$invalid_home/.vscode-server" "$foreign/openai.chatgpt-5.0.0"
+ln -s "$foreign" "$invalid_home/.vscode-server/extensions"
+mkdir -p "$invalid_home/.vscode"
+printf 'not a directory\n' > "$invalid_home/.vscode/extensions"
+HOME="$invalid_home" PATH="$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
+HOME="$invalid_home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/invalid.json"
+grep -q '"id":"openai.chatgpt","installation":"not-detected","listed":false,"directory_present":false' "$SANDBOX/invalid.json"
+
+echo 'PASS verify: local/remote discovery, invalid paths, mixed installs, JSON'

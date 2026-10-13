@@ -2,6 +2,7 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 T="$(mktemp -d)"
+SYSTEM_PATH='/usr/bin:/bin'
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/.codex" "$T/.claude"
 printf 'Keep this custom rule.\n' > "$T/AGENTS.md"
@@ -10,7 +11,7 @@ HOME="$T" bash "$REPO/scripts/install.sh" --dry-run >/dev/null
 [[ ! -d "$T/.agents" ]]
 HOME="$T" bash "$REPO/scripts/install.sh" >/dev/null
 HOME="$T" bash "$REPO/scripts/install.sh" >/dev/null
-HOME="$T" bash "$REPO/scripts/verify.sh"
+HOME="$T" PATH="$SYSTEM_PATH" bash "$REPO/scripts/verify.sh"
 [[ $(grep -Fc '# >>> dev-agent-config managed >>>' "$T/AGENTS.md") -eq 1 ]]
 grep -Fq 'Keep this custom rule.' "$T/AGENTS.md"
 grep -Fq 'Keep existing Codex rule.' "$T/.codex/AGENTS.md"

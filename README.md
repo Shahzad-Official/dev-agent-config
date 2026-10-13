@@ -78,8 +78,12 @@ result, VS Code extension discovery, configuration presence, instruction and ski
 health, and unsupported adapters. CLI, VS Code extension, and configuration presence
 are independent. When a VS Code CLI is available, verification uses its read-only
 extension list; known extension directories are a presence-only fallback and never
-proof that an extension is active. Filesystem verification does not prove that an
-agent activated Ponytail, so runtime activation remains `unverified`.
+proof that an extension is active. The fallback covers local VS Code, Insiders,
+VSCodium, Flatpak/XDG data, VS Code Server and Server Insiders used by Remote SSH,
+WSL, and Dev Containers, plus an explicitly configured `VSCODE_AGENT_FOLDER`.
+Symlinked, invalid, and unreadable extension roots are ignored. Filesystem
+verification does not prove that an agent activated Ponytail, so runtime activation
+remains `unverified`.
 
 ## Ponytail provenance
 

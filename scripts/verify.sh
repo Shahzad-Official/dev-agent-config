@@ -74,20 +74,35 @@ safe_version() {
   [ -n "$line" ] && printf '%s' "$line" || printf unavailable
 }
 
-extension_directory_present() {
-  local extension_id="$1" directory entry
-  [ -n "$extension_id" ] || { printf false; return; }
-  for directory in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" "$HOME/.vscode-oss/extensions" "$HOME/.var/app/com.visualstudio.code/data/vscode/extensions"; do
-    [ -d "$directory" ] && [ ! -L "$directory" ] || continue
+register_extension_directories() {
+  EXTENSION_DIRS="$VERIFY_TMP/extension-directories"
+  : > "$EXTENSION_DIRS"
+  printf '%s\t%s\n' local-vscode "$HOME/.vscode/extensions" >> "$EXTENSION_DIRS"
+  printf '%s\t%s\n' local-insiders "$HOME/.vscode-insiders/extensions" >> "$EXTENSION_DIRS"
+  printf '%s\t%s\n' local-vscodium "$HOME/.vscode-oss/extensions" >> "$EXTENSION_DIRS"
+  printf '%s\t%s\n' remote-vscode "$HOME/.vscode-server/extensions" >> "$EXTENSION_DIRS"
+  printf '%s\t%s\n' remote-insiders "$HOME/.vscode-server-insiders/extensions" >> "$EXTENSION_DIRS"
+  printf '%s\t%s\n' flatpak-vscode "$HOME/.var/app/com.visualstudio.code/data/vscode/extensions" >> "$EXTENSION_DIRS"
+  if [ -n "${XDG_DATA_HOME:-}" ]; then printf '%s\t%s\n' xdg-vscode "$XDG_DATA_HOME/vscode/extensions" >> "$EXTENSION_DIRS"; fi
+  if [ -n "${VSCODE_AGENT_FOLDER:-}" ]; then printf '%s\t%s\n' remote-agent "$VSCODE_AGENT_FOLDER/extensions" >> "$EXTENSION_DIRS"; fi
+}
+
+extension_directory_evidence() {
+  local extension_id="$1" scope directory entry
+  [ -n "$extension_id" ] || return
+  while IFS="$(printf '\t')" read -r scope directory; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] && [ -r "$directory" ] || continue
     for entry in "$directory/$extension_id" "$directory/$extension_id"-*; do
-      if [ -d "$entry" ] && [ ! -L "$entry" ]; then printf true; return; fi
+      if [ -d "$entry" ] && [ ! -L "$entry" ] && [ -r "$entry" ]; then
+        printf '%s\t%s' "$scope" "$entry"
+        return
+      fi
     done
-  done
-  printf false
+  done < "$EXTENSION_DIRS"
 }
 
 discover_vscode_extensions() {
-  local candidate directory output error pid count
+  local candidate scope directory output error pid count attempted=0
   VSCODE_CLI=''
   VSCODE_LIST_STATUS=unavailable
   VSCODE_LIST="$VERIFY_TMP/vscode-extensions"
@@ -98,37 +113,44 @@ discover_vscode_extensions() {
   done
   [ -n "$VSCODE_CLI" ] || return
 
-  directory=''
-  for candidate in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions" "$HOME/.vscode-oss/extensions" "$HOME/.var/app/com.visualstudio.code/data/vscode/extensions"; do
-    if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then directory="$candidate"; break; fi
-  done
   output="$VERIFY_TMP/vscode-stdout"
   error="$VERIFY_TMP/vscode-stderr"
-  (
-    cd "$VERIFY_TMP" || exit 1
-    if [ -n "$directory" ]; then
+  : > "$output"
+  while IFS="$(printf '\t')" read -r scope directory; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] && [ -r "$directory" ] || continue
+    attempted=1
+    part="$VERIFY_TMP/vscode-$scope"
+    (
+      cd "$VERIFY_TMP" || exit 1
       HOME="$VERIFY_TMP" XDG_CONFIG_HOME="$VERIFY_TMP/config" XDG_DATA_HOME="$VERIFY_TMP/data" XDG_CACHE_HOME="$VERIFY_TMP/cache" \
-        "$VSCODE_CLI" --list-extensions --show-versions --extensions-dir "$directory" </dev/null >"$output" 2>"$error"
-    else
+        "$VSCODE_CLI" --list-extensions --show-versions --extensions-dir "$directory" </dev/null >"$part" 2>"$error"
+    ) &
+    pid=$!
+    count=0
+    while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 20 ]; do sleep 0.1; count=$((count + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      VSCODE_LIST_STATUS=timeout
+      return
+    fi
+    if wait "$pid" 2>/dev/null; then cat "$part" >> "$output"; else VSCODE_LIST_STATUS=error; return; fi
+  done < "$EXTENSION_DIRS"
+
+  if [ "$attempted" -eq 0 ]; then
+    (
+      cd "$VERIFY_TMP" || exit 1
       HOME="$VERIFY_TMP" XDG_CONFIG_HOME="$VERIFY_TMP/config" XDG_DATA_HOME="$VERIFY_TMP/data" XDG_CACHE_HOME="$VERIFY_TMP/cache" \
         "$VSCODE_CLI" --list-extensions --show-versions </dev/null >"$output" 2>"$error"
-    fi
-  ) &
-  pid=$!
-  count=0
-  while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 20 ]; do sleep 0.1; count=$((count + 1)); done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    VSCODE_LIST_STATUS=timeout
-    return
+    ) &
+    pid=$!
+    count=0
+    while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 20 ]; do sleep 0.1; count=$((count + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; VSCODE_LIST_STATUS=timeout; return; fi
+    if ! wait "$pid" 2>/dev/null; then VSCODE_LIST_STATUS=error; return; fi
   fi
-  if wait "$pid" 2>/dev/null; then
-    tr '[:upper:]' '[:lower:]' < "$output" | sed 's/@.*$//' > "$VSCODE_LIST"
-    VSCODE_LIST_STATUS=available
-  else
-    VSCODE_LIST_STATUS=error
-  fi
+  tr '[:upper:]' '[:lower:]' < "$output" | sed 's/@.*$//' > "$VSCODE_LIST"
+  VSCODE_LIST_STATUS=available
 }
 
 extension_listed() {
@@ -137,7 +159,7 @@ extension_listed() {
 
 emit_agent() {
   local name="$1" command_name="$2" config_dir="$3" instruction="$4" skill="$5" extension_id="$6"
-  local executable='' installed=0 configured=0 version=unavailable instructions skills skill_target health extension_listed_value=false extension_directory=false extension_installation=not-detected
+  local executable='' installed=0 configured=0 version=unavailable instructions skills skill_target health extension_listed_value=false extension_directory=false extension_installation=not-detected extension_evidence='' extension_scope='' extension_path=''
   executable="$(command -v "$command_name" 2>/dev/null || true)"
   if [ -n "$executable" ]; then installed=1; version="$(safe_version "$executable")"; fi
   if [ -d "$config_dir" ] || [ -e "$instruction" ] || [ -L "$instruction" ]; then configured=1; fi
@@ -146,7 +168,12 @@ emit_agent() {
   skill_target="$(skill_link_target "$skill")"
   if [ -n "$extension_id" ]; then
     if extension_listed "$extension_id"; then extension_listed_value=true; fi
-    extension_directory="$(extension_directory_present "$extension_id")"
+    extension_evidence="$(extension_directory_evidence "$extension_id")"
+    if [ -n "$extension_evidence" ]; then
+      extension_directory=true
+      extension_scope="${extension_evidence%%$(printf '\t')*}"
+      extension_path="${extension_evidence#*$(printf '\t')}"
+    fi
     if [ "$extension_listed_value" = true ]; then extension_installation=confirmed
     elif [ "$extension_directory" = true ]; then extension_installation=directory-only
     fi
@@ -163,9 +190,9 @@ emit_agent() {
   if [ "$JSON" -eq 1 ]; then
     [ "$FIRST_AGENT" -eq 1 ] || printf ','
     FIRST_AGENT=0
-    printf '\n    {"name":"%s","cli":"%s","installed":%s,"version":"%s","vscode_extension":{"id":"%s","installation":"%s","listed":%s,"directory_present":%s,"active":"unverified"},"configured":%s,"configuration_health":"%s","instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"},"runtime_skill_activation":"unverified"}' \
+    printf '\n    {"name":"%s","cli":"%s","installed":%s,"version":"%s","vscode_extension":{"id":"%s","installation":"%s","listed":%s,"directory_present":%s,"directory_scope":"%s","directory_path":"%s","active":"unverified"},"configured":%s,"configuration_health":"%s","instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"},"runtime_skill_activation":"unverified"}' \
       "$(json_string "$name")" "$(json_string "$command_name")" "$(bool "$installed")" "$(json_string "$version")" \
-      "$(json_string "$extension_id")" "$extension_installation" "$extension_listed_value" "$extension_directory" "$(bool "$configured")" "$health" \
+      "$(json_string "$extension_id")" "$extension_installation" "$extension_listed_value" "$extension_directory" "$(json_string "$extension_scope")" "$(json_string "$extension_path")" "$(bool "$configured")" "$health" \
       "$(json_string "$instruction")" "$instructions" "$(json_string "$skill")" "$skills" "$(json_string "$skill_target")"
   else
     printf '\n%s\n' "$name"
@@ -173,7 +200,9 @@ emit_agent() {
     if [ "$installed" -eq 1 ]; then printf ' (%s; %s)' "$executable" "$version"; fi
     printf '\n  configured: %s\n' "$(bool "$configured")"
     if [ -n "$extension_id" ]; then
-      printf '  VS Code extension: %s installation=%s listed=%s directory_present=%s active=unverified\n' "$extension_id" "$extension_installation" "$extension_listed_value" "$extension_directory"
+      printf '  VS Code extension: %s installation=%s listed=%s directory_present=%s' "$extension_id" "$extension_installation" "$extension_listed_value" "$extension_directory"
+      [ -z "$extension_scope" ] || printf ' scope=%s path=%s' "$extension_scope" "$extension_path"
+      printf ' active=unverified\n'
     else
       printf '  VS Code extension: not mapped\n'
     fi
@@ -206,6 +235,7 @@ shared_skill="$HOME/.agents/skills/ponytail"
 shared_instruction_status="$(instruction_status "$shared_instruction")"
 shared_skill_status="$(skill_status "$shared_skill")"
 shared_skill_target="$(skill_link_target "$shared_skill")"
+register_extension_directories
 discover_vscode_extensions
 if [ "$shared_instruction_status" != healthy ] || [ "$shared_skill_status" != healthy ]; then FAILED=1; fi
 
