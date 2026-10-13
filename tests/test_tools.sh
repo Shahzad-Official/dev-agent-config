@@ -22,6 +22,10 @@ if [ "${1:-}" = -c ]; then
   esac
   exit 0
 fi
+if [ "${1:-}" = -m ] && [ "${2:-}" = http.server ]; then
+  printf '%s\n' "$*" >> "${FAKE_GRAPHIFY_LOG:?}.server"
+  exit "${FAKE_SERVER_EXIT:-0}"
+fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ] && [ "${3:-}" = --version ]; then
   case "$0:${FAKE_VENV_MODE:-}" in
     "$FAKE_PYTHON":*) exit 1 ;;
@@ -352,6 +356,11 @@ browser_count="$(wc -l < "$home/graphify.log.browser" | tr -d ' ')"
 SSH_CONNECTION=fixture run_tool "$home" visualize --project "$project" --open > "$home/remote-visualize.out"
 grep -q 'Remote session detected; not launching a browser' "$home/remote-visualize.out"
 [ "$browser_count" = "$(wc -l < "$home/graphify.log.browser" | tr -d ' ')" ]
+serve_output="$(SSH_CONNECTION=fixture run_tool "$home" serve --project "$project" --port 8123)"
+printf '%s\n' "$serve_output" | grep 'http://127.0.0.1:8123/graph.html' >/dev/null
+printf '%s\n' "$serve_output" | grep 'forward port 8123' >/dev/null
+grep -qFx -- "-m http.server 8123 --bind 127.0.0.1 --directory $indexed_root/graphify-out" "$home/graphify.log.server"
+if run_tool "$home" serve --project "$project" --port 0 >/dev/null 2>&1; then echo 'Serve accepted invalid port' >&2; exit 1; fi
 FAKE_UNAME=Linux DISPLAY=:fixture run_tool "$home" visualize --project "$project" --open >/dev/null
 grep -q '^xdg-open ' "$home/graphify.log.browser"
 browser_count="$(wc -l < "$home/graphify.log.browser" | tr -d ' ')"

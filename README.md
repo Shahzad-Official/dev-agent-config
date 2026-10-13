@@ -30,6 +30,30 @@ Only agents whose configuration directory already exists are configured. The
 shared `~/AGENTS.md` and `~/.agents/skills/ponytail` entries are always installed.
 Unexpected instruction symlinks and symlinked parent directories are refused.
 
+## Command-line interface
+
+From a checkout, use the executable at the repository root:
+
+```bash
+./dev-agent-config --help
+./dev-agent-config verify
+./dev-agent-config graphify --help
+```
+
+To make `dev-agent-config` available without the checkout's full path, create a
+user-local symlink (no sudo and no shell-profile edits):
+
+```bash
+./dev-agent-config cli install --dry-run
+./dev-agent-config cli install
+```
+
+The link defaults to `~/.local/bin/dev-agent-config`. If that directory is not
+already in `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to your shell
+profile yourself. Remove only this checkout's link with
+`./dev-agent-config cli uninstall`. The command resolves the checkout through
+the link, so the repository must stay in its current location.
+
 ## Compatibility
 
 | Agent | Global instructions | Portable skill location | Status |
@@ -204,6 +228,7 @@ need to locate `graph.json` yourself:
 ./scripts/tools.sh graphify report --project /path/to/project
 ./scripts/tools.sh graphify visualize --project /path/to/project
 ./scripts/tools.sh graphify visualize --project /path/to/project --open
+./scripts/tools.sh graphify serve --project /path/to/project --port 8080
 ./scripts/tools.sh graphify clean --project /path/to/project --dry-run
 ./scripts/tools.sh graphify clean --project /path/to/project
 ```
@@ -221,6 +246,13 @@ to launch a remote browser. In VS Code Remote SSH, open the printed absolute pat
 from the remote workspace's File > Open File dialog (or the Remote Explorer); the
 HTML is stored under the remote user's XDG data directory, not inside the source
 repository. Supply `--output` when the graph was indexed to a custom output root.
+
+`serve` requires an existing graph and generated `graph.html`; it never indexes
+or generates HTML automatically. It serves that directory in the foreground on
+`127.0.0.1` (default port 8080), with Python's standard-library HTTP server, and
+stops with Ctrl+C. For Remote SSH, forward the printed port from VS Code's Ports
+panel and open `http://localhost:8080/graph.html` on your local Mac. No public
+interface or background service is started.
 
 `clean` removes only the selected project's generated `graphify-out` files (or
 the explicitly supplied custom output's generated index), after checking the
@@ -272,7 +304,8 @@ authenticate them, execute paid requests, or claim unsupported telemetry.
 ## Development and tests
 
 ```bash
-bash -n scripts/*.sh scripts/lib/*.sh tests/*.sh
+bash -n dev-agent-config scripts/*.sh scripts/lib/*.sh scripts/tools/*.sh tests/*.sh
+./tests/test_cli.sh
 ./tests/test_install.sh
 ./tests/test_verify.sh
 ./tests/test_tools.sh

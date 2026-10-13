@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source_path="${BASH_SOURCE[0]}"
+while [ -L "$source_path" ]; do
+  source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  link_target="$(readlink "$source_path")"
+  case "$link_target" in /*) source_path="$link_target" ;; *) source_path="$source_dir/$link_target" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$source_path")" && pwd)"
+
+help() {
+  cat <<EOF
+dev-agent-config — manage shared AI coding-agent configuration and tools
+
+Usage:
+  dev-agent-config <command> [options]
+
+Commands:
+  install [--mode=merge|replace] [--dry-run]  Install shared instructions and skills
+  verify [--json]                            Verify agent/configuration discovery
+  rollback [--dry-run] [BACKUP]               Roll back a configuration transaction
+  uninstall [--apply]                         Remove managed instructions and skills
+  benchmark REPOSITORY OUTPUT_DIR             Prepare isolated benchmark fixtures
+  tools <tool> <action> [options]             Manage optional tools
+  graphify <action> [options]                  Manage Graphify and project graphs
+  cli install|uninstall [options]              Add/remove this command in a user bin directory
+  help                                        Show this help
+
+Use 'dev-agent-config graphify --help' for Graphify commands.
+The user-level CLI link defaults to ~/.local/bin; this does not edit shell startup files.
+EOF
+}
+
+command="${1:-help}"
+shift || true
+if [ "$command" != graphify ] && { [ "${1:-}" = -h ] || [ "${1:-}" = --help ]; }; then help; exit 0; fi
+case "$command" in
+  help|-h|--help) help ;;
+  install) exec bash "$ROOT/scripts/install.sh" "$@" ;;
+  verify) exec bash "$ROOT/scripts/verify.sh" "$@" ;;
+  rollback) exec bash "$ROOT/scripts/rollback.sh" "$@" ;;
+  uninstall) exec bash "$ROOT/scripts/uninstall.sh" "$@" ;;
+  benchmark) exec bash "$ROOT/scripts/benchmark.sh" "$@" ;;
+  tools) exec bash "$ROOT/scripts/tools.sh" "$@" ;;
+  graphify) exec bash "$ROOT/scripts/tools.sh" graphify "$@" ;;
+  cli)
+    action="${1:-}"
+    [ -n "$action" ] || { help; exit 2; }
+    shift
+    exec bash "$ROOT/scripts/cli-link.sh" "$action" "$@"
+    ;;
+  *) printf 'ERROR: Unknown command: %s\n\n' "$command" >&2; help >&2; exit 2 ;;
+esac

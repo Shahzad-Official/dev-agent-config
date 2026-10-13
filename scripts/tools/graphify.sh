@@ -771,12 +771,67 @@ visualize_project() {
   if [ "$should_open" -eq 1 ]; then open_graph_html "$html"; fi
 }
 
+serve_project() {
+  local selected="$1" selected_output="$2" port="$3" port_number final html status=0
+  resolve_project_graph "$selected" "$selected_output"
+  case "$port" in ''|*[!0-9]*|??????*) fail 'Port must be an integer from 1 through 65535' ;; esac
+  port_number=$((10#$port))
+  [ "$port_number" -ge 1 ] && [ "$port_number" -le 65535 ] || fail 'Port must be an integer from 1 through 65535'
+  final="$(dirname "$graph")"
+  html="$final/graph.html"
+  [ -f "$html" ] && [ ! -L "$html" ] || fail "Dashboard is missing: $html. Generate it first with: $ROOT/scripts/tools.sh graphify visualize --project '$project'${selected_output:+ --output '$selected_output'}"
+  say "Serving Graphify dashboard: http://127.0.0.1:$port_number/graph.html"
+  say "Dashboard file: $html"
+  if [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}${VSCODE_AGENT_FOLDER:-}${VSCODE_IPC_HOOK_CLI:-}${REMOTE_CONTAINERS:-}" ]; then
+    say "VS Code Remote SSH: forward port $port_number from the Ports panel, then open http://localhost:$port_number/graph.html on your Mac."
+  fi
+  say 'Stop the foreground server with Ctrl+C.'
+  env \
+    -u OPENAI_API_KEY -u OPENAI_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL \
+    -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_APPLICATION_CREDENTIALS \
+    -u MOONSHOT_API_KEY -u DEEPSEEK_API_KEY -u AZURE_OPENAI_API_KEY -u AZURE_OPENAI_ENDPOINT \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_PROFILE \
+    -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \
+    -u OLLAMA_BASE_URL -u GRAPHIFY_BACKEND \
+    "$tool_dir/venv/bin/python" -m http.server "$port_number" --bind 127.0.0.1 --directory "$final" || status=$?
+  case "$status" in
+    0|130|143) say 'Dashboard server stopped.' ;;
+    *) fail "Dashboard server exited with status $status (port may be in use)" ;;
+  esac
+}
+
+help() {
+  cat <<EOF
+Usage: dev-agent-config graphify <command> [options]
+
+Commands:
+  install [--dry-run] [--verbose]       Install latest stable Graphify
+  repair [--dry-run] [--verbose]        Repair the active managed version
+  check-update                          Compare active and latest stable versions
+  upgrade [--dry-run] [--verbose]       Explicitly upgrade to a newer stable release
+  verify                                Verify the active installation
+  remove [--dry-run]                    Remove Graphify (indexes remain)
+  rollback [--dry-run] [BACKUP]          Roll back a Graphify tool transaction
+  index --project PATH [--output PATH]  Index explicitly selected source in code-only mode
+  query --project PATH QUESTION         Query the existing graph [--budget N]
+  report --project PATH                 Generate a code-only report from an existing graph
+  visualize --project PATH [--open]     Generate native HTML; open only when requested
+  serve --project PATH [--port N]       Serve existing graph.html on 127.0.0.1 (default 8080)
+  clean --project PATH [--output PATH]  Remove only this project's generated index
+
+Project commands accept --output when the graph was indexed to a custom output root.
+Use --help or -h here or at the top-level CLI to display help.
+EOF
+}
+
 usage() {
-  printf 'Usage: %s {install|repair|check-update|upgrade|verify|remove|rollback|index|query|report|visualize|clean} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
-  exit 1
+  help >&2
+  exit 2
 }
 
 action="${1:-}"
+case "$action" in help|-h|--help) help; exit 0 ;; esac
+for argument in "$@"; do case "$argument" in -h|--help) help; exit 0 ;; esac; done
 shift || true
 dry=0
 project=''
@@ -785,12 +840,14 @@ backup=''
 question=''
 budget=''
 should_open=0
+port=8080
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1 ;;
     --project) shift; [ "$#" -gt 0 ] || usage; project="$1" ;;
     --output) shift; [ "$#" -gt 0 ] || usage; output="$1" ;;
     --budget) shift; [ "$#" -gt 0 ] || usage; budget="$1" ;;
+    --port) shift; [ "$#" -gt 0 ] || usage; port="$1" ;;
     --open) should_open=1 ;;
     --verbose) verbose=1 ;;
     --*) usage ;;
@@ -821,5 +878,6 @@ case "$action" in
   report) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; report_project "$project" "$output" ;;
   visualize) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] || usage; visualize_project "$project" "$should_open" "$output" ;;
   clean) [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; clean_project "$dry" "$project" "$output" ;;
+  serve) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; serve_project "$project" "$output" "$port" ;;
   *) usage ;;
 esac
