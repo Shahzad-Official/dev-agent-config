@@ -1,32 +1,170 @@
 #!/usr/bin/env bash
-set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-failed=0
-check_rules() {
-  local file="$1"
-  if [ -f "$file" ] && grep -qF '# >>> dev-agent-config managed >>>' "$file" && grep -qF 'Preserve established architecture' "$file"; then
-    echo "PASS rules: $file"
-  else
-    echo "FAIL rules: $file"; failed=1
-  fi
-}
-check_skill() {
-  local path="$1"
-  if [ -f "$path/SKILL.md" ]; then
-    echo "PASS accessible skill: $path"
-  else
-    echo "FAIL accessible skill: $path"; failed=1
-  fi
-}
-check_rules "$HOME/AGENTS.md"
-check_skill "$HOME/.agents/skills/ponytail"
-if [ -d "$HOME/.codex" ]; then check_rules "$HOME/.codex/AGENTS.md"; fi
-if [ -d "$HOME/.claude" ]; then check_rules "$HOME/.claude/CLAUDE.md"; check_skill "$HOME/.claude/skills/ponytail"; fi
-if [ -d "$HOME/.gemini" ]; then check_rules "$HOME/.gemini/GEMINI.md"; check_skill "$HOME/.gemini/skills/ponytail"; fi
-if [ -d "$HOME/.config/opencode" ]; then
-  check_rules "$HOME/.config/opencode/AGENTS.md"
-  check_skill "$HOME/.config/opencode/skills/ponytail"
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+JSON=0
+[ "${1:-}" = --json ] && JSON=1
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --json ]; }; then
+  echo "Usage: $0 [--json]" >&2
+  exit 2
 fi
-if [ "$failed" -eq 0 ]; then echo 'PASS: filesystem checks complete'; else echo 'FAIL: filesystem checks'; fi
-echo 'NOTE: Runtime loading and automatic skill invocation require a fresh agent session.'
-exit "$failed"
+
+FAILED=0
+FIRST_AGENT=1
+FIRST_UNSUPPORTED=1
+OS="$(uname -s 2>/dev/null || printf unknown)"
+
+bool() { [ "$1" -eq 1 ] && printf true || printf false; }
+json_string() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s//\\r/g'
+}
+
+instruction_status() {
+  local path="$1"
+  if [ -L "$path" ]; then printf symlink
+  elif [ ! -e "$path" ]; then printf missing
+  elif [ ! -f "$path" ]; then printf invalid-type
+  elif grep -qF '# >>> dev-agent-config managed >>>' "$path" && grep -qF 'Preserve established architecture' "$path"; then printf healthy
+  else printf unmanaged
+  fi
+}
+
+skill_status() {
+  local path="$1"
+  if [ -L "$path" ]; then
+    if [ ! -e "$path" ]; then printf broken-link
+    elif [ "$(readlink "$path")" = "$ROOT/skills/ponytail" ] && [ -f "$path/SKILL.md" ]; then printf healthy
+    else printf conflicting-link
+    fi
+  elif [ ! -e "$path" ]; then printf missing
+  else printf unmanaged
+  fi
+}
+
+skill_link_target() {
+  if [ -L "$1" ]; then readlink "$1"; else printf ''; fi
+}
+
+safe_version() {
+  local executable="$1" sandbox out err pid count line
+  sandbox="$(mktemp -d)"
+  out="$sandbox/stdout"
+  err="$sandbox/stderr"
+  # Some CLIs initialize caches even for --version, so isolate all writable homes.
+  ( cd "$sandbox" && HOME="$sandbox" XDG_CONFIG_HOME="$sandbox/config" XDG_DATA_HOME="$sandbox/data" XDG_CACHE_HOME="$sandbox/cache" CI=1 "$executable" --version </dev/null >"$out" 2>"$err" ) &
+  pid=$!
+  count=0
+  while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 20 ]; do
+    sleep 0.1
+    count=$((count + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$sandbox"
+    printf timeout
+    return
+  fi
+  wait "$pid" 2>/dev/null || true
+  line="$(sed -n '1p' "$out")"
+  [ -n "$line" ] || line="$(sed -n '1p' "$err")"
+  rm -rf "$sandbox"
+  [ -n "$line" ] && printf '%s' "$line" || printf unavailable
+}
+
+emit_agent() {
+  local name="$1" command_name="$2" config_dir="$3" instruction="$4" skill="$5"
+  local executable='' installed=0 configured=0 version=unavailable instructions skills skill_target health
+  executable="$(command -v "$command_name" 2>/dev/null || true)"
+  if [ -n "$executable" ]; then installed=1; version="$(safe_version "$executable")"; fi
+  if [ -d "$config_dir" ] || [ -e "$instruction" ] || [ -L "$instruction" ]; then configured=1; fi
+  instructions="$(instruction_status "$instruction")"
+  skills="$(skill_status "$skill")"
+  skill_target="$(skill_link_target "$skill")"
+  if [ "$configured" -eq 0 ]; then
+    health=not-configured
+  elif [ "$instructions" = healthy ] && [ "$skills" = healthy ]; then
+    health=healthy
+  else
+    health=incomplete
+    FAILED=1
+  fi
+
+  if [ "$JSON" -eq 1 ]; then
+    [ "$FIRST_AGENT" -eq 1 ] || printf ','
+    FIRST_AGENT=0
+    printf '\n    {"name":"%s","cli":"%s","installed":%s,"version":"%s","configured":%s,"configuration_health":"%s","instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"},"runtime_skill_activation":"unverified"}' \
+      "$(json_string "$name")" "$(json_string "$command_name")" "$(bool "$installed")" "$(json_string "$version")" \
+      "$(bool "$configured")" "$health" "$(json_string "$instruction")" "$instructions" "$(json_string "$skill")" "$skills" "$(json_string "$skill_target")"
+  else
+    printf '\n%s\n' "$name"
+    printf '  installed: %s' "$(bool "$installed")"
+    if [ "$installed" -eq 1 ]; then printf ' (%s; %s)' "$executable" "$version"; fi
+    printf '\n  configured: %s\n' "$(bool "$configured")"
+    printf '  configuration health: %s\n' "$health"
+    printf '  instructions: %s [%s]\n' "$instruction" "$instructions"
+    printf '  skill: %s' "$skill"
+    [ -z "$skill_target" ] || printf ' -> %s' "$skill_target"
+    printf ' [%s]\n' "$skills"
+    printf '  runtime skill activation: unverified\n'
+  fi
+}
+
+emit_unsupported() {
+  local name="$1" command_name="$2" config1="$3" config2="${4:-}" executable='' installed=0 configured=0
+  executable="$(command -v "$command_name" 2>/dev/null || true)"
+  [ -z "$executable" ] || installed=1
+  if [ -e "$config1" ] || [ -L "$config1" ] || { [ -n "$config2" ] && { [ -e "$config2" ] || [ -L "$config2" ]; }; }; then configured=1; fi
+  if [ "$JSON" -eq 1 ]; then
+    [ "$FIRST_UNSUPPORTED" -eq 1 ] || printf ','
+    FIRST_UNSUPPORTED=0
+    printf '\n    {"name":"%s","installed":%s,"configured":%s,"reason":"adapter not implemented"}' \
+      "$(json_string "$name")" "$(bool "$installed")" "$(bool "$configured")"
+  else
+    printf '  %s: installed=%s configured=%s (adapter not implemented)\n' "$name" "$(bool "$installed")" "$(bool "$configured")"
+  fi
+}
+
+shared_instruction="$HOME/AGENTS.md"
+shared_skill="$HOME/.agents/skills/ponytail"
+shared_instruction_status="$(instruction_status "$shared_instruction")"
+shared_skill_status="$(skill_status "$shared_skill")"
+shared_skill_target="$(skill_link_target "$shared_skill")"
+if [ "$shared_instruction_status" != healthy ] || [ "$shared_skill_status" != healthy ]; then FAILED=1; fi
+
+if [ "$JSON" -eq 1 ]; then
+  printf '{\n  "operating_system":"%s",\n' "$(json_string "$OS")"
+  printf '  "shared":{"instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"}},\n' \
+    "$(json_string "$shared_instruction")" "$shared_instruction_status" "$(json_string "$shared_skill")" "$shared_skill_status" "$(json_string "$shared_skill_target")"
+  printf '  "agents":['
+else
+  printf 'dev-agent-config verification\n'
+  printf 'Operating system: %s\n' "$OS"
+  printf '\nShared configuration\n'
+  printf '  instructions: %s [%s]\n' "$shared_instruction" "$shared_instruction_status"
+  printf '  skill: %s' "$shared_skill"
+  [ -z "$shared_skill_target" ] || printf ' -> %s' "$shared_skill_target"
+  printf ' [%s]\n' "$shared_skill_status"
+fi
+
+emit_agent Codex codex "$HOME/.codex" "$HOME/.codex/AGENTS.md" "$shared_skill"
+emit_agent 'Claude Code' claude "$HOME/.claude" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/skills/ponytail"
+emit_agent 'Gemini CLI' gemini "$HOME/.gemini" "$HOME/.gemini/GEMINI.md" "$HOME/.gemini/skills/ponytail"
+emit_agent OpenCode opencode "$HOME/.config/opencode" "$HOME/.config/opencode/AGENTS.md" "$HOME/.config/opencode/skills/ponytail"
+
+if [ "$JSON" -eq 1 ]; then
+  printf '\n  ],\n  "unsupported":['
+else
+  printf '\nUnsupported adapters\n'
+fi
+emit_unsupported Cursor cursor "$HOME/.cursor"
+emit_unsupported Cline cline "$HOME/.cline" "$HOME/Documents/Cline"
+emit_unsupported Antigravity antigravity "$HOME/.gemini/antigravity"
+
+if [ "$JSON" -eq 1 ]; then
+  printf '\n  ],\n  "runtime_skill_activation":"unverified",\n  "healthy":%s\n}\n' "$( [ "$FAILED" -eq 0 ] && printf true || printf false )"
+else
+  printf '\nRuntime skill activation: unverified (no runtime evidence collected)\n'
+  if [ "$FAILED" -eq 0 ]; then printf 'PASS: configured targets are healthy\n'; else printf 'FAIL: configuration problems found\n'; fi
+fi
+exit "$FAILED"

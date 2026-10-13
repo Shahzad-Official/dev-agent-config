@@ -68,13 +68,16 @@ while installed because skill links point into it.
 
 ```bash
 ./scripts/verify.sh
+./scripts/verify.sh --json       # machine-readable discovery and health report
 ./scripts/uninstall.sh            # preview
 ./scripts/uninstall.sh --apply
 ```
 
-Filesystem verification proves that instructions and skills are accessible. It does
-not prove that an agent activated Ponytail. Start a fresh agent session and use its
-context/skills inspection command to distinguish discovery from activation.
+Verification reports the operating system, CLI installation and safe `--version`
+result, configuration presence, instruction and skill health, and unsupported
+adapters. CLI presence and configuration presence are independent: an old config
+directory is not proof that an agent is installed. Filesystem verification does not
+prove that an agent activated Ponytail, so runtime activation remains `unverified`.
 
 ## Ponytail provenance
 
@@ -110,6 +113,7 @@ authenticate them, execute paid requests, or claim unsupported telemetry.
 ```bash
 bash -n scripts/*.sh scripts/lib/*.sh tests/*.sh
 ./tests/test_install.sh
+./tests/test_verify.sh
 ./tests/smoke.sh
 ```
 
