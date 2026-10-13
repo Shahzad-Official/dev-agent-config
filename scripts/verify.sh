@@ -20,20 +20,11 @@ check_skill() {
 }
 check_rules "$HOME/AGENTS.md"
 check_skill "$HOME/.agents/skills/ponytail"
-for agent in codex claude gemini; do
-  [ -d "$HOME/.$agent" ] || continue
-  case "$agent" in
-    codex) check_rules "$HOME/.codex/AGENTS.md" ;;
-    claude) check_rules "$HOME/.claude/CLAUDE.md" ;;
-    gemini) check_rules "$HOME/.gemini/GEMINI.md" ;;
-  esac
-  check_skill "$HOME/.$agent/skills/ponytail"
-done
-for agent in cursor cline; do
-  [ -d "$HOME/.$agent" ] || continue
-  check_skill "$HOME/.$agent/skills/ponytail"
-done
+if [ -d "$HOME/.codex" ]; then check_rules "$HOME/.codex/AGENTS.md"; fi
+if [ -d "$HOME/.claude" ]; then check_rules "$HOME/.claude/CLAUDE.md"; check_skill "$HOME/.claude/skills/ponytail"; fi
+if [ -d "$HOME/.gemini" ]; then check_rules "$HOME/.gemini/GEMINI.md"; check_skill "$HOME/.gemini/skills/ponytail"; fi
 if [ -d "$HOME/.config/opencode" ]; then
+  check_rules "$HOME/.config/opencode/AGENTS.md"
   check_skill "$HOME/.config/opencode/skills/ponytail"
 fi
 if [ "$failed" -eq 0 ]; then echo 'PASS: filesystem checks complete'; else echo 'FAIL: filesystem checks'; fi

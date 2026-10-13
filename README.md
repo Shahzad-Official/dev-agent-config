@@ -1,55 +1,118 @@
 # dev-agent-config
 
-Portable, public-safe engineering instructions and reusable coding skills for macOS and Linux.
+A small, portable configuration manager for shared coding-agent instructions and
+Agent Skills on macOS and Linux. `AGENTS.md` is the canonical instruction source.
 
-**Status:** Filesystem installation is supported and tested. Skill discovery and automatic invocation must be verified separately for each agent and version. No coding agent or paid API subscription is required to install.
+## Install
 
-## Quick start
+Always preview first:
 
 ```bash
 ./scripts/install.sh --dry-run
-./scripts/install.sh
-./scripts/verify.sh
+./scripts/install.sh --mode=merge
 ```
 
-The installer copies one **managed section** from `AGENTS.md` into `~/AGENTS.md` and supported existing agent instruction entry points, and links the portable Ponytail skill to relevant skills directories. Existing instructions outside the managed section are retained. It deliberately does not create unused agent configurations.
+`merge` is the default. It replaces only this project's marked instruction block,
+preserves all other instructions, and preserves a conflicting same-name skill.
 
-To preview removal: `./scripts/uninstall.sh`. To remove the managed sections and links: `./scripts/uninstall.sh --apply`.
-
-## Supported operating systems and adapters
-
-POSIX-style Bash on macOS and Linux. Confirmed filesystem targets include:
-
-| Agent | Instructions | Skills |
-| --- | --- | --- |
-| Root/home compatible agents | `~/AGENTS.md` | `~/.agents/skills` |
-| Codex | `~/.codex/AGENTS.md` | `~/.codex/skills` |
-| Claude Code | `~/.claude/CLAUDE.md` | `~/.claude/skills` |
-| Gemini CLI | `~/.gemini/GEMINI.md` | `~/.gemini/skills` (check version) |
-| Cursor | Use agent-native rules for global policies | `~/.cursor/skills` (check version) |
-| Cline | Use agent-native rules for global policies | `~/.cline/skills` (check version) |
-| OpenCode | Use native instruction configuration | `~/.config/opencode/skills` (check version) |
-
-Integration paths are best-effort, not a universal discovery standard. Check your installed agent's documentation before relying on a path. The installer never edits JSON, TOML, authentication, plugin, or MCP configuration files.
-
-## Project boundary
-
-Keep architecture decisions, language-specific conventions, and business requirements inside each project. Global instructions are short defaults, not a replacement for project rules.
-
-## Reproducibility and updates
-
-Clone this repository to a stable location (e.g. `~/dev-agent-config`) because symlinks point into the clone. `git pull` updates linked skills immediately. Rerun `./scripts/install.sh` after edits to `AGENTS.md` to refresh managed instruction sections. Consider pinning a Git commit or tag for deployments on multiple machines.
-
-The bundled Ponytail-inspired skill is an MIT-licensed adaptation of [Ponytail](https://github.com/dietrichgebert/ponytail), not an exact mirrored upstream version. You can replace it with a reviewed upstream copy if desired.
-
-## Testing
+To replace agent instruction files and the Ponytail skill:
 
 ```bash
-./tests/test_install.sh
+./scripts/install.sh --mode=replace --dry-run
+./scripts/install.sh --mode=replace
 ```
 
-Use a fresh agent session to confirm that global instructions were auto-loaded and that a skills tool can explicitly invoke Ponytail. A correct or short answer alone does not prove invocation.
+Replace mode affects only documented instruction files and the `ponytail` skill
+entry. It does not edit credentials, authentication, model choices, MCP settings,
+session history, JSON/TOML settings, or project-level instructions.
 
-## Security
+Only agents whose configuration directory already exists are configured. The
+shared `~/AGENTS.md` and `~/.agents/skills/ponytail` entries are always installed.
+Unexpected instruction symlinks and symlinked parent directories are refused.
 
-Do not commit API keys, credentials, `.env` contents, chat logs, or private project details. Before pushing a public repository, run `git status` and review `git diff --cached`.
+## Compatibility
+
+| Agent | Global instructions | Portable skill location | Status |
+| --- | --- | --- | --- |
+| Codex | `~/.codex/AGENTS.md` | `~/.agents/skills/ponytail` | Supported |
+| Claude Code | `~/.claude/CLAUDE.md` | `~/.claude/skills/ponytail` | Supported |
+| Gemini CLI | `~/.gemini/GEMINI.md` | `~/.gemini/skills/ponytail` | Supported |
+| OpenCode | `~/.config/opencode/AGENTS.md` | `~/.config/opencode/skills/ponytail` | Supported |
+| Cursor, Cline, Antigravity | — | — | Not implemented in this prototype |
+
+Project instruction files are never changed. Agent precedence remains native:
+more specific project instructions can supplement or override these global defaults.
+
+## Backups and rollback
+
+Every changing install creates a timestamped backup and TSV manifest under:
+
+```text
+~/.agents/dev-agent-config/backups/
+```
+
+The installer prints its exact rollback command. Restore the latest transaction or
+a selected transaction with:
+
+```bash
+./scripts/rollback.sh --dry-run
+./scripts/rollback.sh
+./scripts/rollback.sh ~/.agents/dev-agent-config/backups/TIMESTAMP-PID
+```
+
+Rollback restores original files, directories, and symbolic links, or removes paths
+that did not exist before the transaction. Keep the repository at the same location
+while installed because skill links point into it.
+
+## Verify and uninstall
+
+```bash
+./scripts/verify.sh
+./scripts/uninstall.sh            # preview
+./scripts/uninstall.sh --apply
+```
+
+Filesystem verification proves that instructions and skills are accessible. It does
+not prove that an agent activated Ponytail. Start a fresh agent session and use its
+context/skills inspection command to distinguish discovery from activation.
+
+## Ponytail provenance
+
+Ponytail is a reviewed local adaptation, version `1.0.0-dev-agent-config`, of the
+MIT-licensed [Ponytail project](https://github.com/dietrichgebert/ponytail). Full
+provenance is recorded in `skills/ponytail/SOURCE.md`. Nothing is downloaded or
+executed during installation.
+
+## Simple benchmark procedure
+
+Prepare three isolated copies of a disposable test repository:
+
+```bash
+./scripts/benchmark.sh /path/to/test-repository /tmp/agent-benchmark
+```
+
+The command creates `default`, `rules`, and `rules-ponytail` variants with separate
+HOME and workspace directories. It never copies credentials. For a fair comparison:
+
+1. Use the same agent release, exact model version, prompt, permissions, repository
+   snapshot, and test command in every variant.
+2. Explicitly request Ponytail in the `rules-ponytail` run so activation is observable.
+3. Record elapsed duration, final diff, and test result.
+4. Record tokens, cost, and tool calls only when the agent exposes them; otherwise
+   mark those fields unavailable.
+5. Repeat runs to reduce one-off model variation, and never use a production project.
+
+The helper prepares environments only. It deliberately does not launch agents,
+authenticate them, execute paid requests, or claim unsupported telemetry.
+
+## Development and tests
+
+```bash
+bash -n scripts/*.sh scripts/lib/*.sh tests/*.sh
+./tests/test_install.sh
+./tests/smoke.sh
+```
+
+Tests use temporary HOME directories and remove them afterward. They cover fresh
+installation, merge, replace, adapters, repeated installation, symlink conflicts,
+rollback, uninstall, and benchmark isolation.
