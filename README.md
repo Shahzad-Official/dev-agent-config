@@ -143,6 +143,24 @@ release URL, digest, and resolved dependencies. A new release is staged and
 verified before it becomes current. Failed upgrades leave the working version
 selected, while successful upgrades can be rolled back with the printed command.
 
+The verified wheel and download helper use a temporary staging directory, but the
+Graphify virtual environment is created directly at its permanent versioned path.
+Python console scripts embed the environment's absolute interpreter path in their
+shebang, so verification checks that the installed `graphify` interpreter exists.
+For an older install with a stale staging-path shebang, verify and explicitly
+repair it with:
+
+```bash
+./scripts/tools.sh graphify verify
+./scripts/tools.sh graphify repair --dry-run
+./scripts/tools.sh graphify repair
+./scripts/tools.sh graphify verify
+```
+
+Repair is limited to a directory with valid manager ownership metadata. It backs
+up that exact version before rebuilding it; the printed rollback command can
+restore the prior directory. Unexpected files and symlinks are not overwritten.
+
 Indexing is explicit and code-only:
 
 ```bash

@@ -9,6 +9,8 @@ PINNED_WHEEL_FILE="$WHEEL_FILE"
 PINNED_WHEEL_URL="$WHEEL_URL"
 PINNED_WHEEL_SHA256="$WHEEL_SHA256"
 STAGE=''
+INSTALL_TARGET=''
+RESTORE_BACKUP=''
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -45,10 +47,32 @@ cleanup_stage() {
   fi
 }
 
+cleanup_install() {
+  local target="${INSTALL_TARGET:-}" restore="${RESTORE_BACKUP:-}"
+  [ -n "$target" ] || return 0
+  INSTALL_TARGET=''
+  RESTORE_BACKUP=''
+  if [ "$(path_type "$target")" = missing ]; then
+    if [ -n "$restore" ] && [ -d "$restore" ] && [ ! -L "$restore" ]; then
+      mkdir -p "$(dirname "$target")" && cp -a "$restore" "$target" || return 1
+    fi
+  elif { [ -f "$target/.dev-agent-config-installing" ] && [ ! -L "$target/.dev-agent-config-installing" ]; } ||
+    { [ -f "$target/.dev-agent-config-tool" ] && [ ! -L "$target/.dev-agent-config-tool" ] && expected_marker | cmp -s - "$target/.dev-agent-config-tool"; }; then
+    rm -rf -- "$target" || return 1
+    if [ -n "$restore" ] && [ -d "$restore" ] && [ ! -L "$restore" ]; then
+      cp -a "$restore" "$target" || return 1
+    fi
+  else
+    printf 'ERROR: Refusing to clean an installation path without its temporary ownership marker: %s\n' "$target" >&2
+    return 1
+  fi
+}
+
 on_exit() {
   local status=$?
   trap - EXIT
   if ! cleanup_stage && [ "$status" -eq 0 ]; then status=1; fi
+  if ! cleanup_install && [ "$status" -eq 0 ]; then status=1; fi
   exit "$status"
 }
 trap on_exit EXIT
@@ -110,8 +134,28 @@ cli_healthy() {
   case "$output" in *"$PACKAGE_VERSION"*) return 0 ;; *) return 1 ;; esac
 }
 
+entrypoint_interpreter() {
+  local line interpreter
+  IFS= read -r line < "$graphify" || return 1
+  case "$line" in '#!'*) ;; *) return 1 ;; esac
+  interpreter="${line#\#!}"
+  interpreter="${interpreter%% *}"
+  printf '%s\n' "$interpreter"
+}
+
+entrypoint_healthy() {
+  local interpreter
+  interpreter="$(entrypoint_interpreter)" || return 1
+  case "$interpreter" in
+    /*) [ -x "$interpreter" ] ;;
+    /usr/bin/env) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 healthy() {
   marker_valid && [ -x "$graphify" ] &&
+    entrypoint_healthy &&
     [ "$(installed_version || true)" = "$PACKAGE_VERSION" ] &&
     cli_healthy &&
     [ -f "$tool_dir/dependencies.txt" ] && [ ! -L "$tool_dir/dependencies.txt" ]
@@ -264,8 +308,13 @@ install_tool() {
   local dry="$1" operation="${2:-install}" python wheel actual backup release_tmp had_current=0
   if load_current_release; then
     had_current=1
-    if ! healthy; then fail "Refusing existing or corrupted tool directory: $tool_dir"; fi
-    if [ "$operation" = install ]; then
+    validate_path "$tool_dir"
+    if [ "$operation" = repair ]; then
+      marker_valid || fail "Refusing to repair a directory without valid manager ownership: $tool_dir"
+      if healthy; then say "UNCHANGED Graphify $PACKAGE_VERSION is already healthy"; return; fi
+    elif ! healthy; then
+      fail "Graphify $PACKAGE_VERSION is manager-owned but unhealthy. Run: $ROOT/scripts/tools.sh graphify repair --dry-run"
+    elif [ "$operation" = install ]; then
       say "UNCHANGED Graphify $PACKAGE_VERSION: $tool_dir"
       say "Run '$ROOT/scripts/tools.sh graphify check-update' to check for a newer stable release."
       return
@@ -273,7 +322,9 @@ install_tool() {
   fi
   preflight || fail 'Graphify prerequisites are not ready; no download or installation was attempted'
   python="$PREFLIGHT_PYTHON"
-  if resolve_latest_release "$python"; then
+  if [ "$operation" = repair ]; then
+    [ "$had_current" -eq 1 ] || fail 'No recorded Graphify installation is available to repair'
+  elif resolve_latest_release "$python"; then
     set_release "$latest_version" "$latest_file" "$latest_url" "$latest_hash"
   elif [ "$operation" = upgrade ]; then
     fail 'Could not resolve the latest stable Graphify release from PyPI'
@@ -281,7 +332,7 @@ install_tool() {
     say "WARNING: Could not resolve PyPI metadata; using verified fallback Graphify $PINNED_VERSION" >&2
     set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
   fi
-  if [ "$had_current" -eq 1 ]; then
+  if [ "$had_current" -eq 1 ] && [ "$operation" = upgrade ]; then
     installed_current="$(cut -f1 "$current_release")"
     if ! version_is_newer "$python" "$PACKAGE_VERSION" "$installed_current"; then
       say "UNCHANGED Graphify $installed_current is already current; latest stable is $PACKAGE_VERSION"
@@ -290,9 +341,11 @@ install_tool() {
   fi
   validate_path "$tool_dir"
   case "$(path_type "$tool_dir")" in
-    missing) ;;
+    missing) [ "$operation" != repair ] || fail "Repair target is missing: $tool_dir" ;;
     directory)
-      if healthy; then
+      if [ "$operation" = repair ]; then
+        marker_valid || fail "Refusing to repair a directory without valid manager ownership: $tool_dir"
+      elif healthy; then
         if [ "$dry" -eq 0 ]; then
           mkdir -p "$state_dir"
           printf '%s\t%s\t%s\t%s\n' "$PACKAGE_VERSION" "$WHEEL_FILE" "$WHEEL_URL" "$WHEEL_SHA256" > "$current_release"
@@ -300,11 +353,15 @@ install_tool() {
         say "UNCHANGED Graphify $PACKAGE_VERSION: $tool_dir"
         return
       fi
-      fail "Refusing existing or corrupted tool directory: $tool_dir"
+      [ "$operation" = repair ] || fail "Refusing existing or corrupted tool directory: $tool_dir"
       ;;
     *) fail "Refusing conflicting tool path: $tool_dir" ;;
   esac
-  say "$( [ "$dry" -eq 1 ] && printf WOULD_INSTALL || printf INSTALLING ) Graphify $PACKAGE_VERSION: $tool_dir"
+  if [ "$operation" = repair ]; then
+    say "$( [ "$dry" -eq 1 ] && printf WOULD_REPAIR || printf REPAIRING ) Graphify $PACKAGE_VERSION: $tool_dir"
+  else
+    say "$( [ "$dry" -eq 1 ] && printf WOULD_INSTALL || printf INSTALLING ) Graphify $PACKAGE_VERSION: $tool_dir"
+  fi
   say "Wheel SHA-256: $WHEEL_SHA256"
   say 'Preflight result: installation can proceed'
   [ "$dry" -eq 0 ] || return 0
@@ -313,29 +370,38 @@ install_tool() {
   cleanup_stale_stages
   STAGE="$(mktemp -d "$tool_parent/.graphify-$PACKAGE_VERSION.staging.XXXXXX")"
   printf '%s\n' "$PACKAGE_VERSION" > "$STAGE/.dev-agent-config-stage"
-  ensure_venv_pip "$python" "$STAGE/venv" || fail 'Could not create a virtual environment with pip after preflight'
-  "$STAGE/venv/bin/python" -m pip download --disable-pip-version-check --no-deps --dest "$STAGE" "$WHEEL_URL"
+  ensure_venv_pip "$python" "$STAGE/download-venv" || fail 'Could not create the temporary download environment after preflight'
+  "$STAGE/download-venv/bin/python" -m pip download --disable-pip-version-check --no-deps --dest "$STAGE" "$WHEEL_URL"
   wheel="$STAGE/$WHEEL_FILE"
   [ -f "$wheel" ] || fail "Downloaded wheel not found: $wheel"
   actual="$(sha256_file "$wheel")"
   [ "$actual" = "$WHEEL_SHA256" ] || fail "Graphify wheel checksum mismatch: $actual"
-  "$STAGE/venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
-  [ "$("$STAGE/venv/bin/python" -c 'from importlib.metadata import version; print(version("graphifyy"))')" = "$PACKAGE_VERSION" ] || fail 'Installed package version mismatch'
-  case "$("$STAGE/venv/bin/graphify" --version 2>/dev/null)" in
+  backup="$(new_backup "$operation")"
+  INSTALL_TARGET="$tool_dir"
+  if [ "$operation" = repair ]; then RESTORE_BACKUP="$backup/original"; fi
+  if [ "$operation" = repair ]; then rm -rf "$tool_dir"; fi
+  mkdir -p "$tool_dir"
+  printf '%s\n' "$PACKAGE_VERSION" > "$tool_dir/.dev-agent-config-installing"
+  ensure_venv_pip "$python" "$tool_dir/venv" || fail 'Could not create the permanent Graphify virtual environment with pip'
+  "$tool_dir/venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
+  [ "$("$tool_dir/venv/bin/python" -c 'from importlib.metadata import version; print(version("graphifyy"))')" = "$PACKAGE_VERSION" ] || fail 'Installed package version mismatch'
+  [ -x "$graphify" ] || fail 'Graphify console script was not installed'
+  entrypoint_healthy || fail "Graphify console script has a missing interpreter: $(entrypoint_interpreter || printf unknown)"
+  case "$("$graphify" --version 2>/dev/null)" in
     *"$PACKAGE_VERSION"*) ;;
     *) fail 'Graphify CLI version check failed' ;;
   esac
-  "$STAGE/venv/bin/python" -m pip freeze --all > "$STAGE/dependencies.txt"
-  expected_marker > "$STAGE/.dev-agent-config-tool"
-  printf '%s\t%s\t%s\t%s\n' "$PACKAGE_VERSION" "$WHEEL_FILE" "$WHEEL_URL" "$WHEEL_SHA256" > "$STAGE/release.tsv"
-  backup="$(new_backup "$operation")"
-  mv "$STAGE" "$tool_dir"
-  STAGE="$tool_dir"
+  "$tool_dir/venv/bin/python" -m pip freeze --all > "$tool_dir/dependencies.txt"
+  expected_marker > "$tool_dir/.dev-agent-config-tool"
+  printf '%s\t%s\t%s\t%s\n' "$PACKAGE_VERSION" "$WHEEL_FILE" "$WHEEL_URL" "$WHEEL_SHA256" > "$tool_dir/release.tsv"
+  cleanup_stage || fail 'Could not clean verified download staging directory'
   mkdir -p "$state_dir"
   release_tmp="$state_dir/.current-release.$$"
   printf '%s\t%s\t%s\t%s\n' "$PACKAGE_VERSION" "$WHEEL_FILE" "$WHEEL_URL" "$WHEEL_SHA256" > "$release_tmp"
+  rm "$tool_dir/.dev-agent-config-installing"
   mv "$release_tmp" "$current_release"
-  STAGE=''
+  INSTALL_TARGET=''
+  RESTORE_BACKUP=''
   say "INSTALLED Graphify $PACKAGE_VERSION"
   say "Dependencies: $tool_dir/dependencies.txt"
   say "Rollback: $ROOT/scripts/tools.sh graphify rollback '$backup'"
@@ -354,6 +420,7 @@ check_update() {
 }
 
 verify_tool() {
+  local interpreter
   load_current_release || set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
   validate_path "$tool_dir"
   case "$(path_type "$tool_dir")" in
@@ -363,6 +430,11 @@ verify_tool() {
   esac
   marker_valid || fail "Graphify ownership metadata is missing or changed: $marker"
   [ -x "$graphify" ] || fail "Graphify executable is missing: $graphify"
+  interpreter="$(entrypoint_interpreter)" || fail "Graphify console script has no valid shebang: $graphify. Repair with: $ROOT/scripts/tools.sh graphify repair --dry-run"
+  case "$interpreter" in
+    /*) [ -x "$interpreter" ] || fail "Graphify console script points to a missing interpreter: $interpreter. Repair with: $ROOT/scripts/tools.sh graphify repair --dry-run" ;;
+    *) fail "Graphify console script has an unsupported interpreter: $interpreter. Repair with: $ROOT/scripts/tools.sh graphify repair --dry-run" ;;
+  esac
   [ "$(installed_version || true)" = "$PACKAGE_VERSION" ] || fail "Graphify package is not version $PACKAGE_VERSION"
   cli_healthy || fail 'Graphify CLI health check failed'
   [ -f "$tool_dir/dependencies.txt" ] && [ ! -L "$tool_dir/dependencies.txt" ] || fail 'Dependency record is missing or unsafe'
@@ -426,7 +498,13 @@ EOF
     [ "$dry" -eq 1 ] || rm -rf "$target"
   elif [ "$type" = directory ]; then
     [ -d "$saved" ] && [ ! -L "$saved" ] || fail 'Managed backup payload is missing or unsafe'
-    if [ "$current" != missing ]; then fail 'Refusing to overwrite an existing path during rollback'; fi
+    if [ "$current" != missing ]; then
+      if [ "$action" = repair ] && [ "$current" = directory ] && marker_valid && healthy; then
+        [ "$dry" -eq 1 ] || rm -rf "$target"
+      else
+        fail 'Refusing to overwrite an existing or unexpected path during rollback'
+      fi
+    fi
     say "$( [ "$dry" -eq 1 ] && printf WOULD_RESTORE || printf RESTORED ) Graphify: $target"
     if [ "$dry" -eq 0 ]; then mkdir -p "$(dirname "$target")"; cp -a "$saved" "$target"; fi
   else
@@ -479,7 +557,7 @@ index_project() {
 }
 
 usage() {
-  printf 'Usage: %s {install|check-update|upgrade|verify|remove|rollback|index} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
+  printf 'Usage: %s {install|repair|check-update|upgrade|verify|remove|rollback|index} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
   exit 1
 }
 
@@ -502,6 +580,7 @@ done
 
 case "$action" in
   install) [ -z "$project$output$backup" ] || usage; install_tool "$dry" ;;
+  repair) [ -z "$project$output$backup" ] || usage; install_tool "$dry" repair ;;
   check-update) [ "$dry" -eq 0 ] && [ -z "$project$output$backup" ] || usage; check_update ;;
   upgrade) [ -z "$project$output$backup" ] || usage; install_tool "$dry" upgrade ;;
   verify) [ "$dry" -eq 0 ] && [ -z "$project$output$backup" ] || usage; verify_tool ;;

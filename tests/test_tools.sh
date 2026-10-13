@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+case "${1:-}" in */graphify) script="$1"; shift; exec bash "$script" "$@" ;; esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SANDBOX="$(mktemp -d)"
@@ -50,8 +51,8 @@ if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
   mkdir -p "$dest/bin"
   cp "$0" "$dest/bin/python"
   printf '%s\n' "${FAKE_LATEST_VERSION:-0.9.88}" > "$dest/bin/VERSION"
-  cat > "$dest/bin/graphify" <<'GRAPHIFY'
-#!/usr/bin/env bash
+  printf '#!%s/bin/python\n' "$dest" > "$dest/bin/graphify"
+  cat >> "$dest/bin/graphify" <<'GRAPHIFY'
 set -euo pipefail
 if [ "${1:-}" = --version ]; then printf 'graphify %s\n' "$(cat "$(dirname "$0")/VERSION")"; exit 0; fi
 [ "${1:-}" = extract ] || exit 2
@@ -162,6 +163,11 @@ run_tool "$home" install --dry-run >/dev/null
 [ ! -e "$(tool_dir "$home")" ]
 run_tool "$home" install >/dev/null
 run_tool "$home" verify >/dev/null
+entrypoint="$(tool_dir "$home")/venv/bin/graphify"
+shebang="$(sed -n '1s/^#!//p' "$entrypoint")"
+[ "$shebang" = "$(tool_dir "$home")/venv/bin/python" ]
+[ -x "$shebang" ]
+case "$shebang" in *staging*) echo 'Installed entry point references staging' >&2; exit 1 ;; esac
 grep -qFx 'graphifyy==0.9.88' "$(tool_dir "$home")/dependencies.txt"
 before="$(find "$home/state/dev-agent-config/tools/graphify/backups" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 repeat_output="$(run_tool "$home" install)"
@@ -187,12 +193,20 @@ verify_output="$(run_tool "$home" verify)"
 case "$verify_output" in *'Graphify 0.9.88: healthy'*) ;; *) exit 1 ;; esac
 [ ! -e "$(tool_dir "$home" 0.9.89)" ]
 
-# Corruption is reported and is never silently replaced.
-rm "$(tool_dir "$home")/venv/bin/graphify"
-if run_tool "$home" verify >/dev/null 2>&1; then echo 'Corrupted tool verified successfully' >&2; exit 1; fi
+# A stale staging interpreter is diagnosed and repaired only on explicit request.
+entrypoint="$(tool_dir "$home")/venv/bin/graphify"
+sed "1c\\
+#!/missing/.graphify-0.9.88.staging.old/venv/bin/python
+" "$entrypoint" > "$home/broken-graphify"
+chmod +x "$home/broken-graphify"
+mv "$home/broken-graphify" "$entrypoint"
+if run_tool "$home" verify >"$home/verify-out" 2>&1; then echo 'Corrupted tool verified successfully' >&2; exit 1; fi
+grep -q 'points to a missing interpreter' "$home/verify-out" || { cat "$home/verify-out" >&2; exit 1; }
+grep -q 'graphify repair --dry-run' "$home/verify-out"
 if run_tool "$home" install >/dev/null 2>&1; then echo 'Corrupted tool was overwritten' >&2; exit 1; fi
-run_tool "$home" remove >/dev/null
-[ ! -e "$(tool_dir "$home")" ]
+run_tool "$home" repair --dry-run >/dev/null
+run_tool "$home" repair >/dev/null
+run_tool "$home" verify >/dev/null
 
 # A link at the managed path is refused without following or changing it.
 home="$(new_home symlink)"
