@@ -12,6 +12,8 @@ HOME="$T" bash "$REPO/scripts/install.sh" --dry-run >/dev/null
 HOME="$T" bash "$REPO/scripts/install.sh" >/dev/null
 HOME="$T" bash "$REPO/scripts/install.sh" >/dev/null
 HOME="$T" PATH="$SYSTEM_PATH" bash "$REPO/scripts/verify.sh"
+HOME="$T" XDG_DATA_HOME="$T/.local/share" XDG_STATE_HOME="$T/.local/state" \
+  bash "$REPO/scripts/tools.sh" graphify install --dry-run >/dev/null
 [[ $(grep -Fc '# >>> dev-agent-config managed >>>' "$T/AGENTS.md") -eq 1 ]]
 grep -Fq 'Keep this custom rule.' "$T/AGENTS.md"
 grep -Fq 'Keep existing Codex rule.' "$T/.codex/AGENTS.md"

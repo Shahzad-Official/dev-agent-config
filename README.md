@@ -92,6 +92,76 @@ MIT-licensed [Ponytail project](https://github.com/dietrichgebert/ponytail). Ful
 provenance is recorded in `skills/ponytail/SOURCE.md`. Nothing is downloaded or
 executed during installation.
 
+## Optional tools: Graphify
+
+Graphify is separate from instructions and skills. Managing it never runs
+`graphify install`, edits `AGENTS.md`, registers hooks or MCP, or starts a service.
+Preview and install the pinned release in a private virtual environment:
+
+```bash
+./scripts/tools.sh graphify install --dry-run
+./scripts/tools.sh graphify install
+./scripts/tools.sh graphify verify
+```
+
+This installs the official `graphifyy==0.9.88` package under
+`${XDG_DATA_HOME:-$HOME/.local/share}/dev-agent-config/tools/graphify/0.9.88`.
+Python 3.10+ with `venv` and pip is required; the script never uses `sudo` or
+system Python package locations. It downloads the official universal wheel and
+checks SHA-256
+`04e5a44c0ff94554315e03d39d8eccfddb2850b77837ede23d75f0f63dc4e66d`
+before installation. Package source and license metadata live in
+`tools/graphify/tool.conf`.
+
+The environment's resolved versions are recorded in `dependencies.txt` after
+installation. The Graphify wheel is exactly pinned and hash-verified, but its
+transitive dependencies are resolved from Graphify's declared constraints and
+are not fully hash-locked. Review `dependencies.txt` when reproducibility or
+supply-chain policy requires a complete dependency lock.
+
+Indexing is explicit and code-only:
+
+```bash
+./scripts/tools.sh graphify index --project /absolute/path/to/project --dry-run
+./scripts/tools.sh graphify index --project /absolute/path/to/project
+./scripts/tools.sh graphify index \
+  --project /absolute/path/to/project \
+  --output /absolute/path/to/output-root
+```
+
+Graphify 0.9.88 interprets `--out OUTPUT_ROOT` as a parent and writes the graph
+to `OUTPUT_ROOT/graphify-out/`. The manager verifies `graph.json`,
+`GRAPH_REPORT.md`, and `graph.html` there. The default output root is an XDG data
+path derived from the canonical project path and is outside the source tree.
+Outputs inside the selected project are refused.
+For rollback and symlink safety, a custom output root must remain beneath `HOME`,
+`XDG_DATA_HOME`, or `XDG_STATE_HOME`.
+
+Every run forces `graphify extract PROJECT --out OUTPUT_ROOT --code-only`, removes
+known AI-provider credentials from the child environment, disables query logging
+and cloud tips, and does not enable document/media extraction. It does not scan
+projects automatically. A project symlink is refused so the selected source is
+unambiguous.
+
+Removal is limited to an installation carrying unchanged manager ownership
+metadata:
+
+```bash
+./scripts/tools.sh graphify remove --dry-run
+./scripts/tools.sh graphify remove
+./scripts/tools.sh graphify rollback --dry-run
+./scripts/tools.sh graphify rollback
+```
+
+Tool backups are stored under
+`${XDG_STATE_HOME:-$HOME/.local/state}/dev-agent-config/tools/graphify/backups`.
+Rollback refuses mismatched manifests, changed install ownership, symlinked paths,
+or an occupied restore destination. Tool rollback is intentionally separate from
+the instruction installer's rollback.
+
+On Debian, the distribution's `python3-venv` package may be needed. The manager
+reports the missing prerequisite but never invokes `apt` or requests `sudo`.
+
 ## Simple benchmark procedure
 
 Prepare three isolated copies of a disposable test repository:
@@ -120,9 +190,10 @@ authenticate them, execute paid requests, or claim unsupported telemetry.
 bash -n scripts/*.sh scripts/lib/*.sh tests/*.sh
 ./tests/test_install.sh
 ./tests/test_verify.sh
+./tests/test_tools.sh
 ./tests/smoke.sh
 ```
 
 Tests use temporary HOME directories and remove them afterward. They cover fresh
 installation, merge, replace, adapters, repeated installation, symlink conflicts,
-rollback, uninstall, and benchmark isolation.
+rollback, uninstall, benchmark isolation, and isolated Graphify tool management.
