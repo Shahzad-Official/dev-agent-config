@@ -12,7 +12,8 @@ mkdir -p "$home"
 grep -q 'graphify <action>' "$SANDBOX/help"
 grep -q 'cli install|uninstall' "$SANDBOX/help"
 "$ROOT/dev-agent-config" graphify --help > "$SANDBOX/graphify-help"
-grep -q 'serve --project PATH' "$SANDBOX/graphify-help"
+grep -q 'serve \[--project PATH\]' "$SANDBOX/graphify-help"
+grep -q 'run \[--project PATH\]' "$SANDBOX/graphify-help"
 
 HOME="$home" PATH=/usr/bin:/bin "$ROOT/dev-agent-config" cli install --dry-run --bin-dir "$home/bin" > "$SANDBOX/dry"
 [ ! -e "$home/bin/dev-agent-config" ]

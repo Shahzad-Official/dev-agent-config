@@ -23,7 +23,7 @@ Commands:
   uninstall [--apply]                         Remove managed instructions and skills
   benchmark REPOSITORY OUTPUT_DIR             Prepare isolated benchmark fixtures
   tools <tool> <action> [options]             Manage optional tools
-  graphify <action> [options]                  Manage Graphify and project graphs
+  graphify <action> [options]                  Manage Graphify; 'run' prepares and serves a project graph
   cli install|uninstall [options]              Add/remove this command in a user bin directory
   help                                        Show this help
 

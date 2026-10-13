@@ -24,6 +24,9 @@ if [ "${1:-}" = -c ]; then
 fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = http.server ]; then
   printf '%s\n' "$*" >> "${FAKE_GRAPHIFY_LOG:?}.server"
+  if [ "${FAKE_SERVER_WAIT:-0}" = 1 ]; then
+    while [ ! -e "${FAKE_SERVER_STOP:?}" ]; do sleep 0.02; done
+  fi
   exit "${FAKE_SERVER_EXIT:-0}"
 fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ] && [ "${3:-}" = --version ]; then
@@ -70,6 +73,7 @@ if [ "${1:-}" = extract ]; then
   done
   [ "${GRAPHIFY_QUERY_LOG_DISABLE:-}" = 1 ]
   [ "${GRAPHIFY_OUT:-}" = "$4/graphify-out" ]
+  [ "${FAKE_INDEX_FAIL:-0}" != 1 ] || { printf 'fixture extraction failed\n' >&2; exit 11; }
   mkdir -p "$4/graphify-out"
   if [ "${FAKE_INVALID_GRAPH:-0}" = 1 ]; then
     printf '{"nodes":[],"edges":[]}\n' > "$4/graphify-out/graph.json"
@@ -161,6 +165,12 @@ run_tool() {
     PATH="$fakebin:/usr/bin:/bin" FAKE_GRAPHIFY_LOG="$home/graphify.log" \
     TMPDIR="$home/tmp" \
     "$ROOT/scripts/tools.sh" graphify "$@"
+}
+
+run_tool_from() {
+  local project_dir="$1" home="$2"
+  shift 2
+  (cd "$project_dir" && run_tool "$home" "$@")
 }
 
 tool_dir() { printf '%s/data/dev-agent-config/tools/graphify/%s\n' "$1" "${2:-0.9.88}"; }
@@ -304,14 +314,14 @@ run_tool "$home" verify >/dev/null
 printf 'changed\n' > "$(tool_dir "$home")/.dev-agent-config-tool"
 if run_tool "$home" remove >/dev/null 2>&1; then echo 'Modified ownership metadata was accepted' >&2; exit 1; fi
 
-# Index requires an explicit real project and always writes code-only output outside it.
+# Index defaults to its current directory and always keeps code-only output outside it.
 home="$(new_home index)"
 run_tool "$home" install >/dev/null
 project="$home/project"
 output="$home/graphs/nest-test"
 mkdir -p "$project"
 printf 'export const value = 1;\n' > "$project/app.ts"
-if run_tool "$home" index >/dev/null 2>&1; then echo 'Index accepted no project' >&2; exit 1; fi
+run_tool_from "$project" "$home" index >/dev/null
 if run_tool "$home" index --project "$project" --output "$project/output" >/dev/null 2>&1; then echo 'Index accepted in-project output' >&2; exit 1; fi
 OPENAI_API_KEY=secret ANTHROPIC_API_KEY=secret OLLAMA_BASE_URL=http://example.invalid \
   HOME="$home" XDG_DATA_HOME="$home/data" XDG_STATE_HOME="$home/state" \
@@ -415,6 +425,155 @@ if run_tool "$home_missing" query --project "$home_missing/project" test >/dev/n
 if run_tool "$home_missing" report --project "$home_missing/project" >/dev/null 2>&1; then echo 'report accepted a missing graph' >&2; exit 1; fi
 if run_tool "$home_missing" visualize --project "$home_missing/project" >/dev/null 2>&1; then echo 'visualize accepted a missing graph' >&2; exit 1; fi
 
+# Omitting --project consistently selects the command's current directory.
+home_cwd="$(new_home current-directory-project)"
+run_tool "$home_cwd" install >/dev/null
+cwd_project="$home_cwd/workspace/project with spaces"
+mkdir -p "$cwd_project"
+run_tool_from "$cwd_project" "$home_cwd" index > "$home_cwd/index.out"
+grep -q "using current directory: $(cd "$cwd_project" && pwd -P)" "$home_cwd/index.out"
+run_tool_from "$cwd_project" "$home_cwd" query 'current directory query' >/dev/null
+run_tool_from "$cwd_project" "$home_cwd" report >/dev/null
+run_tool_from "$cwd_project" "$home_cwd" visualize >/dev/null
+serve_cwd="$(SSH_CONNECTION=fixture run_tool_from "$cwd_project" "$home_cwd" serve)"
+printf '%s\n' "$serve_cwd" | grep 'http://127.0.0.1:8080/graph.html' >/dev/null
+run_tool_from "$cwd_project" "$home_cwd" clean --dry-run | grep 'WOULD_CLEAN' >/dev/null
+run_tool_from "$cwd_project" "$home_cwd" clean >/dev/null
+saved_home="$home"
+home="$home_cwd"
+cwd_graph="$(project_index_root "$cwd_project")/graphify-out"
+home="$saved_home"
+[ ! -e "$cwd_graph" ]
+[ -x "$(tool_dir "$home_cwd")/venv/bin/graphify" ]
+
+# An explicit project wins from another caller directory and symlinked project
+# paths normalize to the same physical project mapping.
+other_project="$home_cwd/other project"
+mkdir -p "$other_project"
+run_tool_from "$cwd_project" "$home_cwd" index --project "$other_project" > "$home_cwd/explicit-project.out"
+grep -qF "extract $(cd "$other_project" && pwd -P) --out" "$home_cwd/graphify.log"
+saved_home="$home"
+home="$home_cwd"
+other_graph="$(project_index_root "$other_project")/graphify-out/graph.json"
+home="$saved_home"
+[ -f "$other_graph" ]
+project_link="$home_cwd/other-project-link"
+ln -s "$other_project" "$project_link"
+run_tool_from "$cwd_project" "$home_cwd" report --project "$project_link" >/dev/null
+home="$home_cwd"
+[ -f "$(project_index_root "$other_project")/graphify-out/GRAPH_REPORT.md" ]
+home="$saved_home"
+if run_tool_from "$cwd_project" "$home_cwd" query --project "$home_cwd/missing project" invalid > "$home_cwd/invalid-project.out" 2>&1; then
+  echo 'Explicit invalid project fell back to caller directory' >&2; exit 1
+fi
+grep -q 'Project directory does not exist' "$home_cwd/invalid-project.out"
+if run_tool_from "$cwd_project" "$home_cwd" clean --project '' --dry-run > "$home_cwd/empty-project.out" 2>&1; then
+  echo 'Explicit empty project fell back to caller directory' >&2; exit 1
+fi
+grep -q 'Project path is empty' "$home_cwd/empty-project.out"
+
+# One-command workflow installs only when missing, indexes/reuses safely, and
+# keeps the old index when a changed-project rebuild fails.
+home_run="$(new_home graphify-run)"
+home="$home_run"
+run_project="$home_run/project with spaces"
+mkdir -p "$run_project"
+printf 'const one = 1;\n' > "$run_project/app.ts"
+dry_run="$(run_tool_from "$run_project" "$home_run" run --dry-run --no-serve)"
+case "$dry_run" in *'Graphify: installation required'*'Plan: create a code-only graph'*'Plan: do not start a dashboard server'*) ;; *) printf '%s\n' "$dry_run" >&2; exit 1 ;; esac
+[ ! -e "$(tool_dir "$home_run")" ]
+run_output="$(run_tool_from "$run_project" "$home_run" run --no-serve)"
+case "$run_output" in *'INSTALLED Graphify'*'INDEXED code-only graph:'*'VISUALIZATION:'*) ;; *) printf '%s\n' "$run_output" >&2; exit 1 ;; esac
+run_index="$(project_index_root "$run_project")/graphify-out"
+[ -s "$run_index/graph.json" ] && [ -s "$run_index/GRAPH_REPORT.md" ] && [ -s "$run_index/graph.html" ]
+run_extracts="$(grep -c ' extract ' "$home_run/graphify.log.versions")"
+run_reuse="$(run_tool_from "$run_project" "$home_run" run --no-serve)"
+case "$run_reuse" in *'UNCHANGED Graphify index:'*'REPORT: reused'*'VISUALIZATION: reused'*) ;; *) printf '%s\n' "$run_reuse" >&2; exit 1 ;; esac
+[ "$run_extracts" = "$(grep -c ' extract ' "$home_run/graphify.log.versions")" ]
+rm "$run_index/GRAPH_REPORT.md"
+run_missing_report="$(run_tool_from "$run_project" "$home_run" run --no-serve)"
+case "$run_missing_report" in *'UNCHANGED Graphify index:'*'REPORT:'*'VISUALIZATION: reused'*) ;; *) printf '%s\n' "$run_missing_report" >&2; exit 1 ;; esac
+[ -s "$run_index/GRAPH_REPORT.md" ]
+[ "$run_extracts" = "$(grep -c ' extract ' "$home_run/graphify.log.versions")" ]
+explicit_run_project="$home_run/explicit project"
+mkdir -p "$explicit_run_project"
+run_tool_from "$run_project" "$home_run" run --no-serve --project "$explicit_run_project" >/dev/null
+[ -s "$(project_index_root "$explicit_run_project")/graphify-out/graph.json" ]
+printf 'const one = 2;\n' > "$run_project/app.ts"
+if FAKE_INDEX_FAIL=1 run_tool_from "$run_project" "$home_run" run --no-serve > "$home_run/run-failed.out" 2>&1; then
+  echo 'Failed run rebuild was accepted' >&2; exit 1
+fi
+grep -q 'Restored previous Graphify index' "$home_run/run-failed.out"
+grep -q '"id":"fixture"' "$run_index/graph.json"
+if FAKE_INVALID_GRAPH=1 run_tool_from "$run_project" "$home_run" run --no-serve --force > "$home_run/invalid-rebuild.out" 2>&1; then
+  echo 'Run accepted an invalid rebuilt graph' >&2; exit 1
+fi
+grep -q 'Restored previous Graphify index' "$home_run/invalid-rebuild.out"
+grep -q '"id":"fixture"' "$run_index/graph.json"
+run_tool_from "$run_project" "$home_run" run --no-serve --force --output "$home_run/custom output" >/dev/null
+[ -s "$home_run/custom output/graphify-out/graph.json" ]
+
+home_run_dry="$(new_home graphify-run-dry)"
+home="$home_run_dry"
+run_dry_project="$home_run_dry/project"
+mkdir -p "$run_dry_project"
+run_tool_from "$run_dry_project" "$home_run_dry" run --dry-run --no-serve >/dev/null
+[ ! -e "$(tool_dir "$home_run_dry")" ]
+[ ! -e "$(project_index_root "$run_dry_project")" ]
+
+home_run_prerequisite="$(new_home graphify-run-prerequisite)"
+home="$home_run_prerequisite"
+mkdir -p "$home_run_prerequisite/project"
+if FAKE_VENV_MODE=no-venv run_tool_from "$home_run_prerequisite/project" "$home_run_prerequisite" run --dry-run --no-serve > "$home_run_prerequisite/preflight.out" 2>&1; then
+  echo 'Run ignored missing Python venv support' >&2; exit 1
+fi
+grep -q 'python3-venv\|includes venv' "$home_run_prerequisite/preflight.out"
+[ ! -e "$(tool_dir "$home_run_prerequisite")" ]
+
+home_run_server="$(new_home graphify-run-server)"
+home="$home_run_server"
+server_project="$home_run_server/project"
+mkdir -p "$server_project"
+if FAKE_SERVER_EXIT=1 run_tool_from "$server_project" "$home_run_server" run --port 9177 > "$home_run_server/server-failed.out" 2>&1; then
+  echo 'Run hid a dashboard port conflict' >&2; exit 1
+fi
+grep -q 'Dashboard server exited with status' "$home_run_server/server-failed.out"
+home="$saved_home"
+
+# The dashboard lock prevents clean while an active server can serve the files.
+run_tool_from "$cwd_project" "$home_cwd" index >/dev/null
+run_tool_from "$cwd_project" "$home_cwd" visualize >/dev/null
+workspace_link="$home_cwd/workspace-link"
+ln -s "$cwd_project" "$workspace_link"
+run_tool_from "$workspace_link" "$home_cwd" query 'symlinked current directory' >/dev/null
+if command -v zsh >/dev/null 2>&1; then
+  (cd "$workspace_link" && HOME="$home_cwd" XDG_DATA_HOME="$home_cwd/data" \
+    XDG_STATE_HOME="$home_cwd/state" PATH="$fakebin:/usr/bin:/bin" \
+    FAKE_GRAPHIFY_LOG="$home_cwd/graphify.log" TMPDIR="$home_cwd/tmp" \
+    zsh -c 'cd "$1" && "$2" graphify query "$3"' zsh \
+      "$workspace_link" "$ROOT/dev-agent-config" 'zsh current directory') >/dev/null
+fi
+active_final="$cwd_graph"
+operation_lock="$(dirname "$active_final")/.dev-agent-config-operation"
+stop_server="$home_cwd/stop-server"
+FAKE_SERVER_WAIT=1 FAKE_SERVER_STOP="$stop_server" SSH_CONNECTION=fixture \
+  run_tool_from "$cwd_project" "$home_cwd" serve > "$home_cwd/active-server.out" &
+server_pid=$!
+tries=0
+while [ ! -f "$operation_lock/owner" ] && [ "$tries" -lt 200 ]; do
+  sleep 0.02
+  tries=$((tries + 1))
+done
+[ -f "$operation_lock/owner" ] || { echo 'Server did not acquire its operation lock' >&2; exit 1; }
+if run_tool_from "$cwd_project" "$home_cwd" clean --dry-run > "$home_cwd/active-clean.out" 2>&1; then
+  echo 'Clean was allowed while the dashboard server was active' >&2; exit 1
+fi
+grep -q 'stop it with Ctrl+C before cleaning' "$home_cwd/active-clean.out"
+touch "$stop_server"
+wait "$server_pid"
+[ ! -e "$operation_lock" ]
+run_tool_from "$cwd_project" "$home_cwd" clean >/dev/null
+
 # Operation helpers reject symlinked graph data rather than following it.
 outside_graph="$SANDBOX/outside-graph.json"
 printf '{"nodes":[],"links":[]}\n' > "$outside_graph"
@@ -431,16 +590,48 @@ home_clean="$(new_home clean-index)"
 run_tool "$home_clean" install >/dev/null
 clean_project="$home_clean/project"
 clean_output="$home_clean/custom-graphs/nest"
+other_clean_project="$home_clean/other-project"
 mkdir -p "$clean_project"
+mkdir -p "$other_clean_project"
 printf 'keep source\n' > "$clean_project/app.ts"
 run_tool "$home_clean" index --project "$clean_project" --output "$clean_output" >/dev/null
-run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" --dry-run | grep 'WOULD_CLEAN' >/dev/null
+run_tool "$home_clean" index --project "$other_clean_project" >/dev/null
+saved_home="$home"
+home="$home_clean"
+other_clean_graph="$(project_index_root "$other_clean_project")/graphify-out/graph.json"
+home="$saved_home"
+realistic="$clean_output/graphify-out"
+mkdir -p "$realistic/cache/ast/v0.9.89-s8-gfixture" \
+  "$realistic/cache/semantic/p0123456789ab" "$realistic/cache/semantic-deep"
+printf '{"cached":true}\n' > "$realistic/cache/$(printf 'e%.0s' {1..64}).json"
+printf '{"nodes":[],"links":[]}\n' > "$realistic/cache/ast/v0.9.89-s8-gfixture/$(printf 'a%.0s' {1..64}).json"
+printf '{"nodes":[]}\n' > "$realistic/cache/semantic/p0123456789ab/$(printf 'b%.0s' {1..64}).json"
+printf 'partial\n' > "$realistic/cache/semantic-deep/$(printf 'c%.0s' {1..64}).json.tmp"
+printf '{}\n' > "$realistic/cache/stat-index.json"
+printf '{"version":"0.9.89"}\n' > "$realistic/manifest.json"
+printf '{"cost":0}\n' > "$realistic/cost.json"
+printf '/tmp/project\n' > "$realistic/.graphify_root"
+printf '{}\n' > "$realistic/.graphify_extract.json"
+printf 'chunk\n' > "$realistic/.graphify_chunk_2_files.txt"
+printf '<html>call flow</html>\n' > "$realistic/sample-project-callflow.html"
+run_tool "$home_clean" visualize --project "$clean_project" --output "$clean_output" >/dev/null
+clean_dry="$(run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" --dry-run)"
+case "$clean_dry" in *"Project: $(cd "$clean_project" && pwd -P)"*"Index target: $realistic"*'WOULD_CLEAN'*) ;; *) echo 'Clean dry-run omitted resolved project or target' >&2; exit 1 ;; esac
 [ -f "$clean_output/graphify-out/graph.json" ]
 run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" >/dev/null
 [ ! -e "$clean_output/graphify-out" ]
+[ -f "$other_clean_graph" ]
 [ -f "$(tool_dir "$home_clean")/venv/bin/graphify" ]
 grep -qFx 'keep source' "$clean_project/app.ts"
 run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" | grep 'no generated Graphify index' >/dev/null
+
+# A partial cleanup interrupted after removing generated files is resumable.
+run_tool "$home_clean" index --project "$clean_project" --output "$clean_output" >/dev/null
+partial="$clean_output/graphify-out"
+rm -f "$partial/graph.html" "$partial/GRAPH_REPORT.md"
+run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" >/dev/null
+[ ! -e "$partial" ]
+run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" >/dev/null
 mkdir -p "$home_clean/unrelated/graphify-out"
 printf '{}\n' > "$home_clean/unrelated/graphify-out/graph.json"
 if run_tool "$home_clean" clean --project "$clean_project" --output "$home_clean/unrelated" >/dev/null 2>&1; then echo 'Clean accepted an unowned custom index' >&2; exit 1; fi
@@ -449,7 +640,17 @@ saved_home="$home"
 home="$home_clean"
 clean_default="$(project_index_root "$clean_project")/graphify-out"
 home="$saved_home"
+mkdir -p "$clean_default/cache/ast/v0.9.89-s8-gfixture"
+printf 'foreign cache content\n' > "$clean_default/cache/ast/v0.9.89-s8-gfixture/unrecognized.txt"
+if run_tool "$home_clean" clean --project "$clean_project" >/dev/null 2>&1; then echo 'Clean accepted an unexpected nested cache file' >&2; exit 1; fi
+[ -f "$clean_default/graph.json" ]
+rm "$clean_default/cache/ast/v0.9.89-s8-gfixture/unrecognized.txt"
 printf 'foreign\n' > "$home_clean/foreign-file"
+ln -s "$home_clean/foreign-file" "$clean_default/cache/ast/v0.9.89-s8-gfixture/$(printf 'd%.0s' {1..64}).json"
+if run_tool "$home_clean" clean --project "$clean_project" >/dev/null 2>&1; then echo 'Clean accepted a nested cache symlink' >&2; exit 1; fi
+[ -f "$clean_default/graph.json" ]
+rm "$clean_default/cache/ast/v0.9.89-s8-gfixture/$(printf 'd%.0s' {1..64}).json"
+rm -r "$clean_default/cache"
 ln -s "$home_clean/foreign-file" "$clean_default/graph.html"
 if run_tool "$home_clean" clean --project "$clean_project" >/dev/null 2>&1; then echo 'Clean accepted a symlink conflict' >&2; exit 1; fi
 grep -qFx foreign "$home_clean/foreign-file"

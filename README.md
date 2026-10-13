@@ -202,26 +202,42 @@ Indexing is explicit and code-only:
   --output /absolute/path/to/output-root
 ```
 
-Graphify 0.9.88 interprets `--out OUTPUT_ROOT` as a parent and writes the graph
+Graphify interprets `--out OUTPUT_ROOT` as a parent and writes the graph
 to `OUTPUT_ROOT/graphify-out/`. The manager treats extraction as successful when
 `graph.json` contains node-link `nodes` and `links` arrays. If extraction does not
 create `GRAPH_REPORT.md`, it separately attempts `cluster-only --no-label --no-viz`
 to generate a report without AI labeling or visualization; report failure is
 reported as a warning and does not invalidate the graph. The default output root
 is an XDG data path derived from the canonical project path and is outside the
-source tree.
-Outputs inside the selected project are refused.
+source tree. Outputs inside the selected project are refused. Project paths
+(including a symlinked project directory) are resolved to their physical
+directory before mapping; this keeps the same project associated with the same
+isolated index.
 For rollback and symlink safety, a custom output root must remain beneath `HOME`,
 `XDG_DATA_HOME`, or `XDG_STATE_HOME`.
 
 Every run forces `graphify extract PROJECT --out OUTPUT_ROOT --code-only`, removes
 known AI-provider credentials from the child environment, disables query logging
 and cloud tips, and does not enable document/media extraction. It does not scan
-projects automatically. A project symlink is refused so the selected source is
-unambiguous.
+projects automatically. The selected project's canonical physical directory is
+used so symlink aliases resolve to one project index.
 
 Project operations use the same default project-specific location, so there is no
-need to locate `graph.json` yourself:
+need to locate `graph.json` yourself. `--project` is optional; from inside a
+repository, the commands below use that current working directory:
+
+```bash
+cd ~/retail-pos-api
+dev-agent-config graphify index
+dev-agent-config graphify query "CreateUserHandler dependencies" --budget 1200
+dev-agent-config graphify report
+dev-agent-config graphify visualize
+dev-agent-config graphify serve --port 8080
+dev-agent-config graphify clean --dry-run
+```
+
+An explicit project always takes precedence, including when the CLI is invoked
+from another directory:
 
 ```bash
 ./scripts/tools.sh graphify query --project /path/to/project "where is auth configured?" --budget 1200
@@ -234,7 +250,15 @@ need to locate `graph.json` yourself:
 ```
 
 For a graph created with a custom `index --output /path/to/output-root`, pass that
-same output root with `--output` to `query`, `report`, or `visualize`.
+same output root with `--output` to `query`, `report`, `visualize`, `serve`, or
+`clean`.
+
+For `index`, `query`, `report`, `visualize`, `serve`, `clean`, and `run`, the calling
+shell's current working directory is used when `--project` is omitted. The CLI
+does not switch to the dev-agent-config installation directory. Paths containing
+spaces and symlinked project directories are normalized before lookup. An
+explicit invalid project path is an error and never falls back to the caller's
+directory.
 
 These commands require a prior successful index and never re-index. Query uses
 Graphify's native traversal against the existing graph; report runs native
@@ -254,10 +278,49 @@ stops with Ctrl+C. For Remote SSH, forward the printed port from VS Code's Ports
 panel and open `http://localhost:8080/graph.html` on your local Mac. No public
 interface or background service is started.
 
-`clean` removes only the selected project's generated `graphify-out` files (or
-the explicitly supplied custom output's generated index), after checking the
-project mapping/ownership marker and rejecting symlink or unexpected-file
-conflicts. It does not remove Graphify itself; `remove` does not clean indexes.
+For the complete local workflow, run this from any project directory:
+
+```bash
+cd ~/retail-pos-api
+dev-agent-config graphify run
+```
+
+`run` reuses a healthy managed Graphify installation (installing the latest
+verified stable release only when missing), indexes code-only when the graph is
+missing or stale, generates a local architecture report and native HTML, then
+serves it on `127.0.0.1:8080` in the foreground. Use `--project PATH` to select
+another project, `--output PATH` for an index created with a custom output root,
+`--port 9090` to select a port, `--no-serve` to stop after generating artifacts,
+`--force` to rebuild, or `--dry-run` to preview the plan. Dry-run does not install,
+index, generate files, or start a server. It may perform the installer's
+temporary prerequisite probe when Graphify is absent; the probe is cleaned up.
+The manager does not repair a corrupted installation automatically; run the
+explicit `graphify repair` command after reviewing its dry-run.
+
+For Git projects, unchanged detection uses the checked-out commit plus tracked
+and untracked Git status; for non-Git folders it uses file-content checksums.
+The non-Git check skips common dependency/build directories (`node_modules`,
+virtual environments, `build`, and `dist`), so changes limited to those ignored
+trees do not trigger a rebuild. The first `run` against an existing index with
+no saved run fingerprint rebuilds it once to establish a baseline. Failed
+rebuilds preserve the prior manager-owned graph and retain failed output for
+inspection. Successful run fingerprints are stored outside the project beneath
+`XDG_STATE_HOME` (or `~/.local/state`). No project app, scripts, tests, hooks,
+MCP servers, or cloud/AI processing are started.
+
+`clean` removes only recognized Graphify-generated files from the selected
+project's `graphify-out` tree (or the explicitly supplied custom output's
+generated index). This includes the standard graph/report/dashboard files,
+Graphify's named `*-callflow.html` visualization, known manifest/cost and
+`.graphify_*` metadata, and hash-named cache files in Graphify's known cache
+namespaces. It validates the complete tree before
+deletion; symlinks, unknown files/directories, and changed ownership metadata
+make the operation fail without starting cleanup. Cleanup removes files
+individually rather than recursively deleting arbitrary content, and can resume
+if interrupted while the manager ownership marker remains. Dry-run prints the
+resolved project and exact index target. If a dashboard server is active for
+that index, clean refuses and asks you to stop it with Ctrl+C. Clean does not
+remove Graphify itself; `remove` does not clean indexes.
 
 Removal is limited to an installation carrying unchanged manager ownership
 metadata:

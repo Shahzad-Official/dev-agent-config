@@ -12,6 +12,14 @@ STAGE=''
 INSTALL_TARGET=''
 RESTORE_BACKUP=''
 INSTALL_LOG=''
+OPERATION_LOCK=''
+OPERATION_ACTION=''
+OPERATION_PROJECT=''
+OPERATION_PID=''
+RUN_BACKUP=''
+RUN_BACKUP_TARGET=''
+RUN_BACKUP_OLD=0
+RUN_BACKUP_COMMITTED=0
 verbose=0
 
 say() { printf '%s\n' "$*"; }
@@ -77,11 +85,68 @@ cleanup_install() {
   fi
 }
 
+operation_owner_contents() {
+  printf 'pid=%s\naction=%s\nproject=%s\n' "$1" "$2" "$3"
+}
+
+cleanup_operation_lock() {
+  local lock="${OPERATION_LOCK:-}" owner
+  [ -n "$lock" ] || return 0
+  owner="$lock/owner"
+  if [ -d "$lock" ] && [ ! -L "$lock" ] && [ -f "$owner" ] && [ ! -L "$owner" ] &&
+    operation_owner_contents "$OPERATION_PID" "$OPERATION_ACTION" "$OPERATION_PROJECT" | cmp -s - "$owner"; then
+    rm -f -- "$owner" && rmdir "$lock" || {
+      printf 'ERROR: Could not release Graphify operation lock: %s\n' "$lock" >&2
+      return 1
+    }
+  else
+    printf 'ERROR: Refusing to remove changed Graphify operation lock: %s\n' "$lock" >&2
+    return 1
+  fi
+  OPERATION_LOCK=''
+  OPERATION_ACTION=''
+  OPERATION_PROJECT=''
+  OPERATION_PID=''
+}
+
+cleanup_run_backup() {
+  local backup="${RUN_BACKUP:-}" target="${RUN_BACKUP_TARGET:-}" failed_target
+  [ -n "$backup" ] || return 0
+  if [ "$RUN_BACKUP_COMMITTED" -eq 0 ]; then
+    if [ -d "$target" ] && [ ! -L "$target" ] && [ -d "$backup/original" ] && [ ! -L "$backup/original" ]; then
+      failed_target="$target.failed.$$"
+      [ ! -e "$failed_target" ] && [ ! -L "$failed_target" ] || failed_target="$target.failed.$$.${RANDOM:-0}"
+      mv "$target" "$failed_target" || {
+        printf 'ERROR: Could not preserve failed Graphify output at %s\n' "$target" >&2
+        return 1
+      }
+      printf 'Preserved failed Graphify output for inspection: %s\n' "$failed_target" >&2
+    fi
+    if [ "$RUN_BACKUP_OLD" -eq 1 ] && [ -d "$backup/original" ] && [ ! -L "$backup/original" ]; then
+      mv "$backup/original" "$target" || {
+        printf 'ERROR: Could not restore the previous Graphify index from %s\n' "$backup/original" >&2
+        return 1
+      }
+      printf 'Restored previous Graphify index: %s\n' "$target" >&2
+    fi
+  fi
+  rmdir "$backup" 2>/dev/null || {
+    printf 'ERROR: Could not clean Graphify run staging directory: %s\n' "$backup" >&2
+    return 1
+  }
+  RUN_BACKUP=''
+  RUN_BACKUP_TARGET=''
+  RUN_BACKUP_OLD=0
+  RUN_BACKUP_COMMITTED=0
+}
+
 on_exit() {
   local status=$?
   trap - EXIT
   if ! cleanup_stage && [ "$status" -eq 0 ]; then status=1; fi
   if ! cleanup_install && [ "$status" -eq 0 ]; then status=1; fi
+  if ! cleanup_operation_lock && [ "$status" -eq 0 ]; then status=1; fi
+  if ! cleanup_run_backup && [ "$status" -eq 0 ]; then status=1; fi
   exit "$status"
 }
 trap on_exit EXIT
@@ -216,9 +281,10 @@ expected_index_marker() { printf 'project=%s\n' "$project"; }
 
 resolve_project_graph() {
   local selected="$1" output="${2:-}" output_physical
-  [ -n "$selected" ] || fail 'This operation requires --project PATH'
-  [ -d "$selected" ] && [ ! -L "$selected" ] || fail "Project must be a real directory, not a symlink: $selected"
-  project="$(cd "$selected" && pwd -P)"
+  [ -n "$selected" ] || fail 'Project path is empty; pass --project PATH or run from the project directory'
+  [ -d "$selected" ] || fail "Project directory does not exist or is inaccessible: $selected"
+  project="$(cd "$selected" 2>/dev/null && pwd -P)" || fail "Could not resolve project directory: $selected"
+  say "Project: $project"
   [ -n "$output" ] || output="$(project_index_root "$project")"
   case "$output" in /*) ;; *) fail "Output root must be absolute: $output" ;; esac
   output="${output%/}"
@@ -632,9 +698,9 @@ EOF
 index_project() {
   local dry="$1" project="$2" output="$3" final output_physical report_status index_marker
   resolve_active_release || fail 'No validated active Graphify installation is recorded; install Graphify first'
-  [ -n "$project" ] || fail 'Indexing requires --project PATH'
-  [ -d "$project" ] && [ ! -L "$project" ] || fail "Project must be a real directory, not a symlink: $project"
-  project="$(cd "$project" && pwd -P)"
+  [ -n "$project" ] || fail 'Project path is empty; pass --project PATH or run from the project directory'
+  [ -d "$project" ] || fail "Project directory does not exist or is inaccessible: $project"
+  project="$(cd "$project" 2>/dev/null && pwd -P)" || fail "Could not resolve project directory: $project"
   if [ -z "$output" ]; then
     output="$(project_index_root "$project")"
   fi
@@ -674,11 +740,191 @@ index_project() {
   fi
 }
 
+operation_lock_path() { printf '%s/.dev-agent-config-operation\n' "$(dirname "$1")"; }
+
+check_operation_lock() {
+  local final="$1" reap="$2" lock owner pid action recorded_project entry
+  lock="$(operation_lock_path "$final")"
+  case "$(path_type "$lock")" in
+    missing) return 0 ;;
+    directory) ;;
+    *) fail "Refusing unsafe Graphify operation lock: $lock" ;;
+  esac
+  owner="$lock/owner"
+  [ -f "$owner" ] && [ ! -L "$owner" ] || fail "Refusing unrecognized Graphify operation lock: $lock"
+  for entry in "$lock"/* "$lock"/.[!.]* "$lock"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "$entry" = "$owner" ] || fail "Refusing unexpected operation-lock data: $entry"
+  done
+  pid="$(sed -n 's/^pid=//p' "$owner" | sed -n '1p')"
+  action="$(sed -n 's/^action=//p' "$owner" | sed -n '1p')"
+  recorded_project="$(sed -n 's/^project=//p' "$owner" | sed -n '1p')"
+  case "$pid" in ''|*[!0-9]*) fail "Invalid Graphify operation-lock PID: $owner" ;; esac
+  case "$action" in serve|clean) ;; *) fail "Invalid Graphify operation-lock action: $owner" ;; esac
+  [ "$recorded_project" = "$project" ] || fail "Graphify operation lock belongs to another project: $lock"
+  if kill -0 "$pid" 2>/dev/null; then
+    if [ "$action" = serve ]; then
+      fail "Graphify dashboard server is active for $project; stop it with Ctrl+C before cleaning the index"
+    fi
+    fail "Another Graphify $action operation is active for $project; wait for it to finish"
+  fi
+  if [ "$reap" -eq 1 ]; then
+    rm -f -- "$owner" && rmdir "$lock" || fail "Could not remove stale Graphify operation lock: $lock"
+  fi
+}
+
+acquire_operation_lock() {
+  local final="$1" action="$2" selected_project="$3" lock
+  check_operation_lock "$final" 1
+  lock="$(operation_lock_path "$final")"
+  mkdir -m 700 -- "$lock" 2>/dev/null || fail "Could not lock this Graphify index for $action; another operation may be active: $lock"
+  if ! (set -C; operation_owner_contents "$$" "$action" "$selected_project" > "$lock/owner"); then
+    rmdir "$lock" 2>/dev/null || true
+    fail "Could not safely record Graphify operation lock: $lock"
+  fi
+  OPERATION_LOCK="$lock"
+  OPERATION_ACTION="$action"
+  OPERATION_PROJECT="$selected_project"
+  OPERATION_PID="$$"
+}
+
+record_operation_pid() {
+  local pid="$1" owner temp
+  owner="$OPERATION_LOCK/owner"
+  [ -n "$OPERATION_LOCK" ] && [ -f "$owner" ] && [ ! -L "$owner" ] || fail 'Graphify operation lock was lost before recording its process'
+  operation_owner_contents "$$" "$OPERATION_ACTION" "$OPERATION_PROJECT" | cmp -s - "$owner" ||
+    fail 'Graphify operation lock changed before recording the server process'
+  temp="$OPERATION_LOCK/owner.tmp.$$"
+  (set -C; operation_owner_contents "$pid" "$OPERATION_ACTION" "$OPERATION_PROJECT" > "$temp") ||
+    fail "Could not safely update Graphify operation lock: $OPERATION_LOCK"
+  mv -f -- "$temp" "$owner" || fail "Could not record the Graphify server process: $OPERATION_LOCK"
+  OPERATION_PID="$pid"
+}
+
+cache_hash_file() {
+  local name="$1" stem suffix
+  case "$name" in
+    *.json) stem="${name%.json}" ;;
+    *.tmp) stem="${name%.tmp}"; stem="${stem%.json}" ;;
+    *) return 1 ;;
+  esac
+  [ "${#stem}" -eq 64 ] || return 1
+  case "$stem" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+cache_namespace_dir() {
+  local name="$1" kind="$2" stem
+  case "$kind:$name" in
+    cache-root:ast|cache-root:semantic|cache-root:semantic-deep) return 0 ;;
+    ast:v*) stem="${name#v}" ;;
+    semantic:p*|semantic-deep:p*) stem="${name#p}" ;;
+    *) return 1 ;;
+  esac
+  [ -n "$stem" ] || return 1
+  case "$stem" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+validate_cache_tree() {
+  local dir="$1" kind="$2" entry base type child_kind
+  [ -d "$dir" ] && [ ! -L "$dir" ] || fail "Refusing unsafe Graphify cache directory: $dir"
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    type="$(path_type "$entry")"
+    [ "$type" != symlink ] || fail "Refusing symlink inside Graphify cache: $entry"
+    if [ "$type" = directory ]; then
+      cache_namespace_dir "$base" "$kind" || fail "Refusing unrecognized Graphify cache directory: $entry"
+      case "$kind" in cache-root) child_kind="$base" ;; *) child_kind=entries ;; esac
+      validate_cache_tree "$entry" "$child_kind"
+    elif [ "$type" = file ]; then
+      if [ "$kind" = cache-root ] && [ "$base" = stat-index.json ]; then :
+      else cache_hash_file "$base" || fail "Refusing unrecognized Graphify cache file: $entry"; fi
+    else
+      fail "Refusing unsafe Graphify cache entry: $entry"
+    fi
+  done
+}
+
+generated_file_name() {
+  local name="$1" rest digits
+  case "$name" in
+    graph.json|graph.html|GRAPH_REPORT.md|manifest.json|cost.json|.graphify_root|\
+    .graphify_detect.json|.graphify_extract.json|.graphify_ast.json|\
+    .graphify_semantic.json|.graphify_semantic_new.json|.graphify_analysis.json|\
+    .graphify_labels.json|.graphify_uncached.txt|.graphify_chunks.json|\
+    .graphify_dispatch_started) return 0 ;;
+    *-callflow.html)
+      rest="${name%-callflow.html}"
+      [ -n "$rest" ] || return 1
+      case "$rest" in *[!A-Za-z0-9._\ -]*) return 1 ;; esac
+      return 0
+      ;;
+    .graphify_chunk_*.json) rest="${name#.graphify_chunk_}"; digits="${rest%.json}" ;;
+    .graphify_chunk_*_files.txt) rest="${name#.graphify_chunk_}"; digits="${rest%_files.txt}" ;;
+    *) return 1 ;;
+  esac
+  [ -n "$digits" ] || return 1
+  case "$digits" in *[!0-9]*) return 1 ;; esac
+}
+
+validate_generated_tree() {
+  local final="$1" entry base type
+  [ -d "$final" ] && [ ! -L "$final" ] || fail "Refusing unsafe generated index directory: $final"
+  for entry in "$final"/* "$final"/.[!.]* "$final"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    type="$(path_type "$entry")"
+    [ "$type" != symlink ] || fail "Refusing symlink in generated Graphify index: $entry"
+    if [ "$base" = .dev-agent-config-index ]; then
+      [ "$type" = file ] && expected_index_marker | cmp -s - "$entry" || fail "Index ownership metadata changed during cleanup: $entry"
+    elif [ "$base" = cache ]; then
+      validate_cache_tree "$entry" cache-root
+    elif generated_file_name "$base"; then
+      [ "$type" = file ] || fail "Refusing unsafe Graphify output entry: $entry"
+    else
+      fail "Refusing to delete unrecognized index data: $entry"
+    fi
+  done
+}
+
+remove_generated_tree() {
+  local dir="$1" kind="$2" entry base type child_kind
+  [ -d "$dir" ] && [ ! -L "$dir" ] || fail "Refusing changed Graphify output directory: $dir"
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    [ "$base" != .dev-agent-config-index ] || continue
+    type="$(path_type "$entry")"
+    [ "$type" != symlink ] || fail "Refusing symlink during Graphify cleanup: $entry"
+    if [ "$type" = directory ]; then
+      if [ "$kind" = output ] && [ "$base" = cache ]; then
+        child_kind=cache-root
+      else
+        cache_namespace_dir "$base" "$kind" || fail "Refusing changed Graphify cache directory: $entry"
+        case "$kind" in cache-root) child_kind="$base" ;; *) child_kind=entries ;; esac
+      fi
+      remove_generated_tree "$entry" "$child_kind"
+      rmdir "$entry" || fail "Could not remove empty generated Graphify directory: $entry"
+    elif [ "$type" = file ]; then
+      if [ "$kind" = output ]; then
+        generated_file_name "$base" || fail "Refusing changed Graphify output file: $entry"
+      elif [ "$kind" = cache-root ] && [ "$base" = stat-index.json ]; then
+        :
+      else
+        cache_hash_file "$base" || fail "Refusing changed Graphify cache file: $entry"
+      fi
+      rm -f -- "$entry" || fail "Could not remove generated Graphify file: $entry"
+    else
+      fail "Refusing unsafe Graphify output entry during cleanup: $entry"
+    fi
+  done
+}
+
 clean_project() {
-  local dry="$1" selected="$2" output="$3" project='' expected='' final='' marker='' entry base
-  [ -n "$selected" ] || fail 'Clean requires --project PATH'
-  [ -d "$selected" ] && [ ! -L "$selected" ] || fail "Project must be a real directory, not a symlink: $selected"
-  project="$(cd "$selected" && pwd -P)"
+  local dry="$1" selected="$2" output="$3" project='' expected='' final='' marker='' entry empty=1 owned=0
+  [ -n "$selected" ] || fail 'Project path is empty; pass --project PATH or run from the project directory'
+  [ -d "$selected" ] || fail "Project directory does not exist or is inaccessible: $selected"
+  project="$(cd "$selected" 2>/dev/null && pwd -P)" || fail "Could not resolve project directory: $selected"
   expected="$(project_index_root "$project")"
   [ -n "$output" ] || output="$expected"
   case "$output" in /*) ;; *) fail "Output root must be absolute: $output" ;; esac
@@ -686,6 +932,8 @@ clean_project() {
   validate_path "$output/graphify-out"
   case "$(physical_path "$output")" in "$project"|"$project"/*) fail 'Graphify output must be outside the source project' ;; esac
   final="$output/graphify-out"
+  say "Project: $project"
+  say "Index target: $final"
   case "$(path_type "$final")" in
     missing) say "UNCHANGED: no generated Graphify index at $final"; return ;;
     directory) ;;
@@ -694,18 +942,33 @@ clean_project() {
   marker="$final/.dev-agent-config-index"
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     [ -f "$marker" ] && [ ! -L "$marker" ] && expected_index_marker | cmp -s - "$marker" || fail "Index ownership metadata is missing, changed, or belongs to another project: $marker"
+    owned=1
   else
+    for entry in "$final"/* "$final"/.[!.]* "$final"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      empty=0
+    done
+    if [ "$empty" -eq 1 ]; then
+      say "UNCHANGED: no generated Graphify index at $final"
+      return
+    fi
     [ "$output" = "$expected" ] && [ -f "$final/graph.json" ] && [ ! -L "$final/graph.json" ] || fail "Cannot safely identify this index. Re-index this project with the manager, then retry clean."
   fi
-  for entry in "$final"/* "$final"/.[!.]*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    base="$(basename "$entry")"
-    case "$base" in graph.json|GRAPH_REPORT.md|graph.html|.dev-agent-config-index) ;; *) fail "Refusing to delete unrecognized index data: $entry" ;; esac
-    [ -f "$entry" ] && [ ! -L "$entry" ] || fail "Refusing unsafe index entry: $entry"
-  done
+  check_operation_lock "$final" "$((1 - dry))"
+  validate_generated_tree "$final"
   say "$( [ "$dry" -eq 1 ] && printf WOULD_CLEAN || printf CLEANING ) generated Graphify index: $final"
   [ "$dry" -eq 0 ] || return 0
-  rm -f -- "$final/graph.json" "$final/GRAPH_REPORT.md" "$final/graph.html" "$marker"
+  acquire_operation_lock "$final" clean "$project"
+  validate_generated_tree "$final"
+  if [ "$owned" -eq 1 ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && expected_index_marker | cmp -s - "$marker" || fail "Index ownership metadata changed during cleanup: $marker"
+  fi
+  remove_generated_tree "$final" output
+  if [ "$owned" -eq 1 ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && expected_index_marker | cmp -s - "$marker" || fail "Index ownership metadata changed during cleanup: $marker"
+    rm -f -- "$marker" || fail "Could not remove Graphify index ownership metadata: $marker"
+  fi
+  cleanup_operation_lock
   rmdir "$final" || fail "Index files were removed, but unexpected data remains in: $final"
   say "CLEANED generated Graphify index for $project; Graphify remains installed"
 }
@@ -772,7 +1035,7 @@ visualize_project() {
 }
 
 serve_project() {
-  local selected="$1" selected_output="$2" port="$3" port_number final html status=0
+  local selected="$1" selected_output="$2" port="$3" port_number final html status=0 project=''
   resolve_project_graph "$selected" "$selected_output"
   case "$port" in ''|*[!0-9]*|??????*) fail 'Port must be an integer from 1 through 65535' ;; esac
   port_number=$((10#$port))
@@ -780,6 +1043,7 @@ serve_project() {
   final="$(dirname "$graph")"
   html="$final/graph.html"
   [ -f "$html" ] && [ ! -L "$html" ] || fail "Dashboard is missing: $html. Generate it first with: $ROOT/scripts/tools.sh graphify visualize --project '$project'${selected_output:+ --output '$selected_output'}"
+  acquire_operation_lock "$final" serve "$project"
   say "Serving Graphify dashboard: http://127.0.0.1:$port_number/graph.html"
   say "Dashboard file: $html"
   if [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}${VSCODE_AGENT_FOLDER:-}${VSCODE_IPC_HOOK_CLI:-}${REMOTE_CONTAINERS:-}" ]; then
@@ -793,11 +1057,169 @@ serve_project() {
     -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_PROFILE \
     -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \
     -u OLLAMA_BASE_URL -u GRAPHIFY_BACKEND \
-    "$tool_dir/venv/bin/python" -m http.server "$port_number" --bind 127.0.0.1 --directory "$final" || status=$?
+    "$tool_dir/venv/bin/python" -m http.server "$port_number" --bind 127.0.0.1 --directory "$final" &
+  server_pid=$!
+  record_operation_pid "$server_pid"
+  wait "$server_pid" || status=$?
   case "$status" in
     0|130|143) say 'Dashboard server stopped.' ;;
     *) fail "Dashboard server exited with status $status (port may be in use)" ;;
   esac
+}
+
+fingerprint_walk() {
+  local root="$1" dir="$2" entry base
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    if [ -d "$entry" ] && [ ! -L "$entry" ]; then
+      case "$base" in .git|.hg|.svn|node_modules|.venv|venv|build|dist) continue ;; esac
+      fingerprint_walk "$root" "$entry"
+    elif [ -f "$entry" ] && [ ! -L "$entry" ]; then
+      printf '%s\0' "${entry#"$root"/}"
+      cksum < "$entry" | awk '{ printf "%s:%s\0", $1, $2 }'
+    fi
+  done
+}
+
+project_fingerprint() {
+  local selected="$1" status
+  if command -v git >/dev/null 2>&1 && git -C "$selected" rev-parse --show-toplevel >/dev/null 2>&1; then
+    status="$(GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$selected" status --porcelain --untracked-files=all --ignore-submodules=all 2>/dev/null)" || return 1
+    printf '%s\n%s\n' "$(git -C "$selected" rev-parse HEAD 2>/dev/null || printf no-head)" "$status" | cksum | awk '{print $1 "-" $2}'
+  else
+    (export LC_ALL=C; fingerprint_walk "$selected" "$selected") | cksum | awk '{print $1 "-" $2}'
+  fi
+}
+
+run_state_path() {
+  local selected="$1" output="$2" key
+  key="$(printf '%s\0%s' "$selected" "$output" | cksum | awk '{print $1}')"
+  printf '%s/run-state/%s.tsv\n' "$state_dir" "$key"
+}
+
+run_state_matches() {
+  local file="$1" selected="$2" output="$3" fingerprint="$4"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  printf 'project=%s\noutput=%s\nfingerprint=%s\n' "$selected" "$output" "$fingerprint" | cmp -s - "$file"
+}
+
+save_run_state() {
+  local file="$1" selected="$2" output="$3" fingerprint="$4" temp
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || fail "Refusing unsafe Graphify run state: $file"
+  fi
+  mkdir -p "$(dirname "$file")"
+  temp="$file.tmp.$$"
+  (set -C; printf 'project=%s\noutput=%s\nfingerprint=%s\n' "$selected" "$output" "$fingerprint" > "$temp") ||
+    fail "Could not write Graphify run state: $file"
+  mv -f "$temp" "$file" || fail "Could not update Graphify run state: $file"
+}
+
+run_project() {
+  local dry="$1" selected="$2" selected_output="$3" port="$4" no_serve="$5" force="$6"
+  local output final index_marker fingerprint state_file indexed=0 report html
+  [ -n "$selected" ] || fail 'Project path is empty; pass --project PATH or run from the project directory'
+  [ -d "$selected" ] || fail "Project directory does not exist or is inaccessible: $selected"
+  project="$(cd "$selected" 2>/dev/null && pwd -P)" || fail "Could not resolve project directory: $selected"
+  say "Project: $project"
+  output="$selected_output"
+  [ -n "$output" ] || output="$(project_index_root "$project")"
+  case "$output" in /*) ;; *) fail "Output root must be absolute: $output" ;; esac
+  output="${output%/}"
+  validate_path "$output/graphify-out"
+  case "$(physical_path "$output")" in "$project"|"$project"/*) fail 'Graphify output must be outside the source project' ;; esac
+  final="$output/graphify-out"
+  index_marker="$final/.dev-agent-config-index"
+  state_file="$(run_state_path "$project" "$output")"
+  validate_path "$state_file"
+
+  if [ "$dry" -eq 1 ]; then
+    fingerprint=""
+    if resolve_active_release; then
+      healthy || fail "Graphify $PACKAGE_VERSION is manager-owned but unhealthy; explicitly run graphify repair"
+      say "Graphify: reuse healthy $PACKAGE_VERSION"
+      fingerprint="$(project_fingerprint "$project")" || fail "Could not inspect project changes safely: $project"
+    elif [ -e "$current_release" ] || [ -L "$current_release" ]; then
+      fail "Could not resolve the recorded Graphify installation: $current_release"
+    else
+      say 'Graphify: installation required'
+      install_tool 1
+    fi
+    say "Index target: $final"
+    if [ "$force" -eq 1 ]; then
+      say 'Plan: rebuild the code-only graph (--force)'
+    elif [ -n "$fingerprint" ] && [ -f "$final/graph.json" ] && [ ! -L "$final/graph.json" ] &&
+      valid_node_link_graph "$final/graph.json" && run_state_matches "$state_file" "$project" "$output" "$fingerprint"; then
+      say "Plan: reuse unchanged graph $final/graph.json"
+      [ -f "$final/GRAPH_REPORT.md" ] && [ ! -L "$final/GRAPH_REPORT.md" ] || say "Plan: generate report $final/GRAPH_REPORT.md"
+      [ -f "$final/graph.html" ] && [ ! -L "$final/graph.html" ] || say "Plan: generate visualization $final/graph.html"
+    elif [ -f "$final/graph.json" ] || [ -L "$final/graph.json" ]; then
+      say 'Plan: validate and rebuild the missing, changed, or invalid code-only graph'
+      say 'Plan: generate a code-only report and native visualization'
+    else
+      say 'Plan: create a code-only graph, report, and native visualization'
+    fi
+    if [ "$no_serve" -eq 1 ]; then say 'Plan: do not start a dashboard server'
+    else say "Plan: serve on http://127.0.0.1:$port/graph.html in the foreground"; fi
+    return 0
+  fi
+
+  if resolve_active_release; then
+    healthy || fail "Graphify $PACKAGE_VERSION is manager-owned but unhealthy; explicitly run graphify repair"
+  elif [ -e "$current_release" ] || [ -L "$current_release" ]; then
+    fail "Could not resolve the recorded Graphify installation: $current_release"
+  else
+    say 'Graphify is not installed; installing the latest verified stable release.'
+    install_tool 0
+    resolve_active_release && healthy || fail 'Graphify installation did not produce a healthy active release'
+  fi
+
+  if [ -e "$final" ] || [ -L "$final" ]; then
+    [ -d "$final" ] && [ ! -L "$final" ] || fail "Refusing unsafe Graphify index path: $final"
+    if [ -e "$index_marker" ] || [ -L "$index_marker" ]; then
+      [ -f "$index_marker" ] && [ ! -L "$index_marker" ] && expected_index_marker | cmp -s - "$index_marker" || fail "Graph output ownership conflict: $index_marker"
+    else
+      for report in "$final"/* "$final"/.[!.]* "$final"/..?*; do
+        [ -e "$report" ] || [ -L "$report" ] || continue
+        fail "Refusing to replace an index without manager ownership metadata: $final"
+      done
+    fi
+    validate_generated_tree "$final"
+  fi
+  fingerprint="$(project_fingerprint "$project")" || fail "Could not inspect project changes safely: $project"
+  if [ "$force" -eq 0 ] && valid_node_link_graph "$final/graph.json" &&
+    run_state_matches "$state_file" "$project" "$output" "$fingerprint"; then
+    say "UNCHANGED Graphify index: $final/graph.json"
+  else
+    if [ -d "$final" ]; then
+      mkdir -p "$output"
+      RUN_BACKUP="$(mktemp -d "$output/.dev-agent-config-run.XXXXXX")"
+      RUN_BACKUP_TARGET="$final"
+      RUN_BACKUP_OLD=1
+      mv "$final" "$RUN_BACKUP/original" || fail "Could not stage the previous Graphify index: $final"
+    fi
+    index_project 0 "$project" "$output"
+    valid_node_link_graph "$final/graph.json" || fail "Graphify run produced an invalid graph: $final/graph.json"
+    indexed=1
+    if [ -n "$RUN_BACKUP" ] && [ -d "$RUN_BACKUP/original" ]; then
+      validate_generated_tree "$RUN_BACKUP/original"
+      remove_generated_tree "$RUN_BACKUP/original" output
+      rm -f -- "$RUN_BACKUP/original/.dev-agent-config-index"
+      rmdir "$RUN_BACKUP/original" || fail 'Could not remove the replaced Graphify index backup'
+      RUN_BACKUP_COMMITTED=1
+      cleanup_run_backup || fail 'Could not clean the previous Graphify index backup'
+    fi
+  fi
+  save_run_state "$state_file" "$project" "$output" "$fingerprint"
+  report="$final/GRAPH_REPORT.md"
+  if [ "$indexed" -eq 1 ] || [ ! -f "$report" ] || [ -L "$report" ]; then report_project "$project" "$output"; else say "REPORT: reused $report"; fi
+  html="$final/graph.html"
+  if [ "$indexed" -eq 1 ] || [ ! -f "$html" ] || [ -L "$html" ]; then visualize_project "$project" 0 "$output"; else say "VISUALIZATION: reused $html"; fi
+  say "Graph: $final/graph.json"
+  say "Report: $report"
+  say "Visualization: $html"
+  if [ "$no_serve" -eq 0 ]; then serve_project "$project" "$output" "$port"; fi
 }
 
 help() {
@@ -812,13 +1234,16 @@ Commands:
   verify                                Verify the active installation
   remove [--dry-run]                    Remove Graphify (indexes remain)
   rollback [--dry-run] [BACKUP]          Roll back a Graphify tool transaction
-  index --project PATH [--output PATH]  Index explicitly selected source in code-only mode
-  query --project PATH QUESTION         Query the existing graph [--budget N]
-  report --project PATH                 Generate a code-only report from an existing graph
-  visualize --project PATH [--open]     Generate native HTML; open only when requested
-  serve --project PATH [--port N]       Serve existing graph.html on 127.0.0.1 (default 8080)
-  clean --project PATH [--output PATH]  Remove only this project's generated index
+  index [--project PATH] [--output PATH]  Index code-only (default project: current directory)
+  query [--project PATH] QUESTION         Query the existing graph [--budget N]
+  report [--project PATH]                 Generate a code-only report from an existing graph
+  visualize [--project PATH] [--open]     Generate native HTML; open only when requested
+  serve [--project PATH] [--port N]       Serve existing graph.html on 127.0.0.1 (default 8080)
+  clean [--project PATH] [--output PATH]  Remove only this project's generated index
+  run [--project PATH] [--output PATH] [--port N] [--no-serve] [--force] [--dry-run]
+                                         Ensure installation, index, report, visualize, and serve
 
+For index/query/report/visualize/serve/clean/run, omitted --project uses the current directory.
 Project commands accept --output when the graph was indexed to a custom output root.
 Use --help or -h here or at the top-level CLI to display help.
 EOF
@@ -840,15 +1265,20 @@ backup=''
 question=''
 budget=''
 should_open=0
+project_set=0
+no_serve=0
+force=0
 port=8080
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1 ;;
-    --project) shift; [ "$#" -gt 0 ] || usage; project="$1" ;;
+    --project) shift; [ "$#" -gt 0 ] || usage; project="$1"; project_set=1 ;;
     --output) shift; [ "$#" -gt 0 ] || usage; output="$1" ;;
     --budget) shift; [ "$#" -gt 0 ] || usage; budget="$1" ;;
     --port) shift; [ "$#" -gt 0 ] || usage; port="$1" ;;
     --open) should_open=1 ;;
+    --no-serve) no_serve=1 ;;
+    --force) force=1 ;;
     --verbose) verbose=1 ;;
     --*) usage ;;
     *)
@@ -862,22 +1292,35 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$action" in
-  install) [ -z "$project$output$backup" ] || usage; install_tool "$dry" ;;
-  repair) [ -z "$project$output$backup" ] || usage; install_tool "$dry" repair ;;
-  check-update) [ "$dry" -eq 0 ] && [ -z "$project$output$backup" ] || usage; check_update ;;
-  upgrade) [ -z "$project$output$backup" ] || usage; install_tool "$dry" upgrade ;;
-  verify) [ "$dry" -eq 0 ] && [ -z "$project$output$backup" ] || usage; verify_tool ;;
-  remove) [ -z "$project$output$backup" ] || usage; remove_tool "$dry" ;;
-  rollback) [ -z "$project$output" ] || usage; rollback_tool "$dry" "$backup" ;;
-  index) [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; index_project "$dry" "$project" "$output" ;;
+  index|query|report|visualize|serve|clean|run)
+    if [ "$project_set" -eq 0 ]; then
+      project="$(pwd -P)"
+      say "No --project supplied; using current directory: $project"
+    fi
+    ;;
+esac
+
+case "$action" in
+  install) [ "$no_serve$force" = 00 ] && [ -z "$project$output$backup" ] || usage; install_tool "$dry" ;;
+  repair) [ "$no_serve$force" = 00 ] && [ -z "$project$output$backup" ] || usage; install_tool "$dry" repair ;;
+  check-update) [ "$dry" -eq 0 ] && [ "$no_serve$force" = 00 ] && [ -z "$project$output$backup" ] || usage; check_update ;;
+  upgrade) [ "$no_serve$force" = 00 ] && [ -z "$project$output$backup" ] || usage; install_tool "$dry" upgrade ;;
+  verify) [ "$dry" -eq 0 ] && [ "$no_serve$force" = 00 ] && [ -z "$project$output$backup" ] || usage; verify_tool ;;
+  remove) [ "$no_serve$force" = 00 ] && [ -z "$project$output$backup" ] || usage; remove_tool "$dry" ;;
+  rollback) [ "$no_serve$force" = 00 ] && [ -z "$project$output" ] || usage; rollback_tool "$dry" "$backup" ;;
+  index) [ "$no_serve$force" = 00 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; index_project "$dry" "$project" "$output" ;;
   query)
-    [ "$dry" -eq 0 ] && [ -z "$backup" ] && [ "$should_open" -eq 0 ] || usage
+    [ "$dry" -eq 0 ] && [ "$no_serve$force" = 00 ] && [ -z "$backup" ] && [ "$should_open" -eq 0 ] || usage
     case "$budget" in ''|*[!0-9]*|0*) [ -z "$budget" ] || usage ;; esac
     query_project "$project" "$question" "$budget" "$output"
     ;;
-  report) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; report_project "$project" "$output" ;;
-  visualize) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] || usage; visualize_project "$project" "$should_open" "$output" ;;
-  clean) [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; clean_project "$dry" "$project" "$output" ;;
-  serve) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; serve_project "$project" "$output" "$port" ;;
+  report) [ "$dry" -eq 0 ] && [ "$no_serve$force" = 00 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; report_project "$project" "$output" ;;
+  visualize) [ "$dry" -eq 0 ] && [ "$no_serve$force" = 00 ] && [ -z "$backup$budget$question" ] || usage; visualize_project "$project" "$should_open" "$output" ;;
+  clean) [ "$no_serve$force" = 00 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; clean_project "$dry" "$project" "$output" ;;
+  serve) [ "$dry" -eq 0 ] && [ "$no_serve$force" = 00 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; serve_project "$project" "$output" "$port" ;;
+  run)
+    [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage
+    run_project "$dry" "$project" "$output" "$port" "$no_serve" "$force"
+    ;;
   *) usage ;;
 esac
