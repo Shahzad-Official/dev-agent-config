@@ -172,9 +172,13 @@ Indexing is explicit and code-only:
 ```
 
 Graphify 0.9.88 interprets `--out OUTPUT_ROOT` as a parent and writes the graph
-to `OUTPUT_ROOT/graphify-out/`. The manager verifies `graph.json`,
-`GRAPH_REPORT.md`, and `graph.html` there. The default output root is an XDG data
-path derived from the canonical project path and is outside the source tree.
+to `OUTPUT_ROOT/graphify-out/`. The manager treats extraction as successful when
+`graph.json` contains node-link `nodes` and `links` arrays. If extraction does not
+create `GRAPH_REPORT.md`, it separately attempts `cluster-only --no-label --no-viz`
+to generate a report without AI labeling or visualization; report failure is
+reported as a warning and does not invalidate the graph. The default output root
+is an XDG data path derived from the canonical project path and is outside the
+source tree.
 Outputs inside the selected project are refused.
 For rollback and symlink safety, a custom output root must remain beneath `HOME`,
 `XDG_DATA_HOME`, or `XDG_STATE_HOME`.
@@ -184,6 +188,30 @@ known AI-provider credentials from the child environment, disables query logging
 and cloud tips, and does not enable document/media extraction. It does not scan
 projects automatically. A project symlink is refused so the selected source is
 unambiguous.
+
+Project operations use the same default project-specific location, so there is no
+need to locate `graph.json` yourself:
+
+```bash
+./scripts/tools.sh graphify query --project /path/to/project "where is auth configured?" --budget 1200
+./scripts/tools.sh graphify report --project /path/to/project
+./scripts/tools.sh graphify visualize --project /path/to/project
+./scripts/tools.sh graphify visualize --project /path/to/project --open
+```
+
+For a graph created with a custom `index --output /path/to/output-root`, pass that
+same output root with `--output` to `query`, `report`, or `visualize`.
+
+These commands require a prior successful index and never re-index. Query uses
+Graphify's native traversal against the existing graph; report runs native
+`cluster-only --no-label --no-viz`; visualization uses native `export html` and
+does not recluster or modify source files. Query logging is disabled and known
+provider credentials are removed from each Graphify process. `--open` is opt-in;
+headless Linux and SSH/VS Code Remote sessions print the HTML path without trying
+to launch a remote browser. In VS Code Remote SSH, open the printed absolute path
+from the remote workspace's File > Open File dialog (or the Remote Explorer); the
+HTML is stored under the remote user's XDG data directory, not inside the source
+repository. Supply `--output` when the graph was indexed to a custom output root.
 
 Removal is limited to an installation carrying unchanged manager ownership
 metadata:

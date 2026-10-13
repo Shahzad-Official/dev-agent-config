@@ -17,6 +17,7 @@ if [ "${1:-}" = -c ]; then
     *urlopen*) printf '%s\tgraphifyy-%s-py3-none-any.whl\thttps://files.pythonhosted.org/packages/test/graphifyy-%s.whl\t04e5a44c0ff94554315e03d39d8eccfddb2850b77837ede23d75f0f63dc4e66d\n' "${FAKE_LATEST_VERSION:-0.9.88}" "${FAKE_LATEST_VERSION:-0.9.88}" "${FAKE_LATEST_VERSION:-0.9.88}" ;;
     *'a=tuple'*) [[ "$3" > "$4" ]] ;;
     *'version("graphifyy")'*) if [ -f "$(dirname "$0")/VERSION" ]; then cat "$(dirname "$0")/VERSION"; else printf '%s\n' "${FAKE_LATEST_VERSION:-0.9.88}"; fi ;;
+    *json.load*) case "$(tr -d '[:space:]' < "$3")" in *'"nodes":['*'"links":['*) ;; *) exit 1 ;; esac ;;
     *sys.version_info*) printf '3.11.0\n' ;;
   esac
   exit 0
@@ -55,18 +56,38 @@ if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
   cat >> "$dest/bin/graphify" <<'GRAPHIFY'
 set -euo pipefail
 if [ "${1:-}" = --version ]; then printf 'graphify %s\n' "$(cat "$(dirname "$0")/VERSION")"; exit 0; fi
-[ "${1:-}" = extract ] || exit 2
-[ "${3:-}" = --out ] && [ "${5:-}" = --code-only ] || { printf 'bad args: %s\n' "$*" >&2; exit 3; }
-for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY MOONSHOT_API_KEY DEEPSEEK_API_KEY AWS_ACCESS_KEY_ID OLLAMA_BASE_URL; do
-  eval '[ "${'"$key"'+x}" != x ]' || { printf 'credential leaked: %s\n' "$key" >&2; exit 4; }
-done
-[ "${GRAPHIFY_QUERY_LOG_DISABLE:-}" = 1 ]
-[ "${GRAPHIFY_OUT:-}" = graphify-out ]
-mkdir -p "$4/graphify-out"
-printf '{}\n' > "$4/graphify-out/graph.json"
-printf '# report\n' > "$4/graphify-out/GRAPH_REPORT.md"
-printf '<html></html>\n' > "$4/graphify-out/graph.html"
-printf '%s\n' "$*" > "${FAKE_GRAPHIFY_LOG:?}"
+if [ "${1:-}" = extract ]; then
+  [ "${3:-}" = --out ] && [ "${5:-}" = --code-only ] || { printf 'bad args: %s\n' "$*" >&2; exit 3; }
+  for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY MOONSHOT_API_KEY DEEPSEEK_API_KEY AWS_ACCESS_KEY_ID OLLAMA_BASE_URL; do
+    eval '[ "${'"$key"'+x}" != x ]' || { printf 'credential leaked: %s\n' "$key" >&2; exit 4; }
+  done
+  [ "${GRAPHIFY_QUERY_LOG_DISABLE:-}" = 1 ]
+  [ "${GRAPHIFY_OUT:-}" = "$4/graphify-out" ]
+  mkdir -p "$4/graphify-out"
+  if [ "${FAKE_INVALID_GRAPH:-0}" = 1 ]; then
+    printf '{"nodes":[],"edges":[]}\n' > "$4/graphify-out/graph.json"
+  else
+    printf '{"nodes":[{"id":"fixture"}],"links":[{"source":"fixture","target":"fixture"}]}\n' > "$4/graphify-out/graph.json"
+  fi
+  printf '%s\n' "$*" > "${FAKE_GRAPHIFY_LOG:?}"
+elif [ "${1:-}" = cluster-only ]; then
+  [ -z "${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}${AWS_ACCESS_KEY_ID:-}${OLLAMA_BASE_URL:-}" ] || exit 9
+  [ "${3:-}" = --graph ] && [ "${5:-}" = --no-label ] && [ "${6:-}" = --no-viz ] || { printf 'bad cluster args: %s\n' "$*" >&2; exit 5; }
+  printf '%s\n' "$*" > "${FAKE_GRAPHIFY_LOG:?}.cluster"
+  [ "${FAKE_REPORT_FAIL:-0}" != 1 ] || exit 6
+  printf '# report\n' > "$GRAPHIFY_OUT/GRAPH_REPORT.md"
+elif [ "${1:-}" = query ]; then
+  [ "${GRAPHIFY_QUERY_LOG_DISABLE:-}" = 1 ] || exit 7
+  [ -z "${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}${AWS_ACCESS_KEY_ID:-}${OLLAMA_BASE_URL:-}" ] || exit 10
+  printf '%s\n' "$*" >> "${FAKE_GRAPHIFY_LOG:?}"
+  printf 'query fixture output\n'
+elif [ "${1:-}" = export ] && [ "${2:-}" = html ]; then
+  [ "${3:-}" = --graph ] || exit 8
+  printf '%s\n' "$*" >> "${FAKE_GRAPHIFY_LOG:?}"
+  printf '<html>fixture graph</html>\n' > "$GRAPHIFY_OUT/graph.html"
+else
+  exit 2
+fi
 GRAPHIFY
   chmod +x "$dest/bin/graphify"
   exit 0
@@ -101,6 +122,20 @@ exec /bin/rm "$@"
 REMOVE
 chmod +x "$fakebin/rm"
 
+for opener in open xdg-open gio; do
+  cat > "$fakebin/$opener" <<'OPEN'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> "${FAKE_GRAPHIFY_LOG:?}.browser"
+OPEN
+  chmod +x "$fakebin/$opener"
+done
+
+cat > "$fakebin/uname" <<'UNAME'
+#!/usr/bin/env bash
+if [ -n "${FAKE_UNAME:-}" ]; then printf '%s\n' "$FAKE_UNAME"; else exec /usr/bin/uname "$@"; fi
+UNAME
+chmod +x "$fakebin/uname"
+
 new_home() {
   local name="$1" home="$SANDBOX/$1"
   mkdir -p "$home"
@@ -118,6 +153,13 @@ run_tool() {
 }
 
 tool_dir() { printf '%s/data/dev-agent-config/tools/graphify/%s\n' "$1" "${2:-0.9.88}"; }
+project_index_root() {
+  local project="$1" name key
+  project="$(cd "$project" && pwd -P)"
+  name="$(basename "$project" | tr -c 'A-Za-z0-9._-' '_')"
+  key="$(printf '%s' "$project" | cksum | awk '{print $1}')"
+  printf '%s/data/dev-agent-config/graphify/indexes/%s-%s\n' "$home" "$name" "$key"
+}
 
 # Preflight does not need system pip, bootstraps missing venv pip, and explains blockers.
 home="$(new_home preflight-no-system-pip)"
@@ -255,8 +297,63 @@ project_physical="$(cd "$project" && pwd -P)"
 grep -qFx "extract $project_physical --out $output --code-only" "$home/graphify.log"
 [ -f "$output/graphify-out/graph.json" ]
 [ -f "$output/graphify-out/GRAPH_REPORT.md" ]
-[ -f "$output/graphify-out/graph.html" ]
+grep -q '"nodes"' "$output/graphify-out/graph.json"
+grep -q '"links"' "$output/graphify-out/graph.json"
+grep -qFx "cluster-only $output --graph $output/graphify-out/graph.json --no-label --no-viz" "$home/graphify.log.cluster"
+report_failure_output="$(FAKE_REPORT_FAIL=1 run_tool "$home" index --project "$project" --output "$home/graphs/report-failure" 2>&1)"
+case "$report_failure_output" in *'INDEXED code-only graph:'*'optional report could not be generated'*) ;; *) echo 'Report failure was not reported separately' >&2; exit 1 ;; esac
+[ -f "$home/graphs/report-failure/graphify-out/graph.json" ]
+[ ! -e "$home/graphs/report-failure/graphify-out/GRAPH_REPORT.md" ]
+if FAKE_INVALID_GRAPH=1 run_tool "$home" index --project "$project" --output "$home/graphs/invalid" >/dev/null 2>&1; then echo 'Invalid graph JSON was accepted' >&2; exit 1; fi
 [ ! -e "$project/graphify-out" ]
 grep -qFx 'export const value = 1;' "$project/app.ts"
+
+# Project operations resolve the default isolated graph without asking for graph.json.
+run_tool "$home" index --project "$project" >/dev/null
+indexed_root="$(project_index_root "$project")"
+indexed_graph="$indexed_root/graphify-out/graph.json"
+query_output="$(OPENAI_API_KEY=secret ANTHROPIC_API_KEY=secret OLLAMA_BASE_URL=http://example.invalid run_tool "$home" query --project "$project" 'where is the fixture symbol?' --budget 640)"
+case "$query_output" in *'query fixture output'*) ;; *) echo 'Query did not run against indexed graph' >&2; exit 1 ;; esac
+grep -qFx "query where is the fixture symbol? --budget 640 --graph $indexed_graph" "$home/graphify.log"
+run_tool "$home" query --project "$project" test --output "$output" >/dev/null
+grep -qFx "query test --graph $output/graphify-out/graph.json" "$home/graphify.log"
+extract_count="$(grep -c '^extract ' "$home/graphify.log")"
+run_tool "$home" report --project "$project" >/dev/null
+[ -f "$indexed_root/graphify-out/GRAPH_REPORT.md" ]
+run_tool "$home" visualize --project "$project" >/dev/null
+[ -f "$indexed_root/graphify-out/graph.html" ]
+[ ! -e "$home/graphify.log.browser" ]
+run_tool "$home" visualize --project "$project" --open >/dev/null
+[ -f "$home/graphify.log.browser" ]
+grep -qF "$indexed_root/graphify-out/graph.html" "$home/graphify.log.browser"
+browser_count="$(wc -l < "$home/graphify.log.browser" | tr -d ' ')"
+SSH_CONNECTION=fixture run_tool "$home" visualize --project "$project" --open > "$home/remote-visualize.out"
+grep -q 'Remote session detected; not launching a browser' "$home/remote-visualize.out"
+[ "$browser_count" = "$(wc -l < "$home/graphify.log.browser" | tr -d ' ')" ]
+FAKE_UNAME=Linux DISPLAY=:fixture run_tool "$home" visualize --project "$project" --open >/dev/null
+grep -q '^xdg-open ' "$home/graphify.log.browser"
+browser_count="$(wc -l < "$home/graphify.log.browser" | tr -d ' ')"
+FAKE_UNAME=Linux DISPLAY= WAYLAND_DISPLAY= run_tool "$home" visualize --project "$project" --open > "$home/headless-visualize.out"
+grep -q 'No desktop display detected' "$home/headless-visualize.out"
+[ "$browser_count" = "$(wc -l < "$home/graphify.log.browser" | tr -d ' ')" ]
+[ "$extract_count" = "$(grep -c '^extract ' "$home/graphify.log")" ]
+
+home_missing="$(new_home graph-operations-missing)"
+run_tool "$home_missing" install >/dev/null
+mkdir -p "$home_missing/project"
+if run_tool "$home_missing" query --project "$home_missing/project" test >/dev/null 2>&1; then echo 'query accepted a missing graph' >&2; exit 1; fi
+if run_tool "$home_missing" report --project "$home_missing/project" >/dev/null 2>&1; then echo 'report accepted a missing graph' >&2; exit 1; fi
+if run_tool "$home_missing" visualize --project "$home_missing/project" >/dev/null 2>&1; then echo 'visualize accepted a missing graph' >&2; exit 1; fi
+
+# Operation helpers reject symlinked graph data rather than following it.
+outside_graph="$SANDBOX/outside-graph.json"
+printf '{"nodes":[],"links":[]}\n' > "$outside_graph"
+rm "$indexed_graph"
+ln -s "$outside_graph" "$indexed_graph"
+if run_tool "$home" query --project "$project" test >/dev/null 2>&1; then echo 'Query followed a graph symlink' >&2; exit 1; fi
+rm "$indexed_graph"
+printf '{"nodes":{},"links":[]}\n' > "$indexed_graph"
+if run_tool "$home" query --project "$project" test > "$home/invalid-query.out" 2>&1; then echo 'Query accepted an invalid node-link graph' >&2; exit 1; fi
+grep -q 'expected nodes and links arrays' "$home/invalid-query.out"
 
 echo 'PASS tools: install, repeat, corruption, symlinks, rollback, remove, code-only index'

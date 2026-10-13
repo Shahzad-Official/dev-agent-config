@@ -161,6 +161,47 @@ healthy() {
     [ -f "$tool_dir/dependencies.txt" ] && [ ! -L "$tool_dir/dependencies.txt" ]
 }
 
+run_graphify() {
+  env \
+    -u OPENAI_API_KEY -u OPENAI_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL \
+    -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_APPLICATION_CREDENTIALS \
+    -u MOONSHOT_API_KEY -u DEEPSEEK_API_KEY -u AZURE_OPENAI_API_KEY -u AZURE_OPENAI_ENDPOINT \
+    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_PROFILE \
+    -u AWS_REGION -u AWS_DEFAULT_REGION -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_ROLE_ARN \
+    -u OLLAMA_BASE_URL -u GRAPHIFY_BACKEND \
+    GRAPHIFY_QUERY_LOG_DISABLE=1 GRAPHIFY_NO_TIPS=1 GRAPHIFY_NO_CTA=1 \
+    "$graphify" "$@"
+}
+
+valid_node_link_graph() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    "$tool_dir/venv/bin/python" -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); assert isinstance(data.get("nodes"), list) and isinstance(data.get("links"), list)' "$1" >/dev/null 2>&1
+}
+
+project_index_root() {
+  local project="$1" name key
+  name="$(basename "$project" | tr -c 'A-Za-z0-9._-' '_')"
+  key="$(printf '%s' "$project" | cksum | awk '{print $1}')"
+  printf '%s/dev-agent-config/graphify/indexes/%s-%s\n' "$data_home" "$name" "$key"
+}
+
+resolve_project_graph() {
+  local selected="$1" output="${2:-}" output_physical
+  [ -n "$selected" ] || fail 'This operation requires --project PATH'
+  [ -d "$selected" ] && [ ! -L "$selected" ] || fail "Project must be a real directory, not a symlink: $selected"
+  project="$(cd "$selected" && pwd -P)"
+  [ -n "$output" ] || output="$(project_index_root "$project")"
+  case "$output" in /*) ;; *) fail "Output root must be absolute: $output" ;; esac
+  output="${output%/}"
+  validate_path "$output/graphify-out/graph.json"
+  output_physical="$(physical_path "$output")"
+  case "$output_physical" in "$project"|"$project"/*) fail 'Managed Graphify output must be outside the source project' ;; esac
+  graph="$output/graphify-out/graph.json"
+  [ -f "$graph" ] && [ ! -L "$graph" ] || fail "No indexed Graphify graph for this project: $graph. Run '$ROOT/scripts/tools.sh graphify index --project '$project'' first."
+  healthy || fail "Graphify $PACKAGE_VERSION is not installed and healthy"
+  valid_node_link_graph "$graph" || fail "Invalid Graphify node-link graph (expected nodes and links arrays): $graph. Re-index this project with '$ROOT/scripts/tools.sh graphify index --project '$project'' (and its original --output root, if customized)."
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
@@ -522,15 +563,13 @@ EOF
 }
 
 index_project() {
-  local dry="$1" project="$2" output="$3" name key final output_physical
+  local dry="$1" project="$2" output="$3" final output_physical report_status
   load_current_release || set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
   [ -n "$project" ] || fail 'Indexing requires --project PATH'
   [ -d "$project" ] && [ ! -L "$project" ] || fail "Project must be a real directory, not a symlink: $project"
   project="$(cd "$project" && pwd -P)"
   if [ -z "$output" ]; then
-    name="$(basename "$project" | tr -c 'A-Za-z0-9._-' '_')"
-    key="$(printf '%s' "$project" | cksum | awk '{print $1}')"
-    output="$data_home/dev-agent-config/graphify/indexes/$name-$key"
+    output="$(project_index_root "$project")"
   fi
   case "$output" in /*) ;; *) fail "Output root must be absolute: $output" ;; esac
   output="${output%/}"
@@ -543,21 +582,88 @@ index_project() {
   say "Graph output: $final"
   [ "$dry" -eq 0 ] || return 0
   mkdir -p "$output"
-  env \
-    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY \
-    -u MOONSHOT_API_KEY -u DEEPSEEK_API_KEY -u AZURE_OPENAI_API_KEY -u AZURE_OPENAI_ENDPOINT \
-    -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_PROFILE \
-    -u AWS_REGION -u AWS_DEFAULT_REGION -u OLLAMA_BASE_URL -u GRAPHIFY_BACKEND \
-    GRAPHIFY_OUT=graphify-out GRAPHIFY_QUERY_LOG_DISABLE=1 GRAPHIFY_NO_TIPS=1 GRAPHIFY_NO_CTA=1 \
-    "$graphify" extract "$project" --out "$output" --code-only
-  [ -f "$final/graph.json" ] || fail "Graphify did not create expected output: $final/graph.json"
-  [ -f "$final/GRAPH_REPORT.md" ] || fail "Graphify did not create expected output: $final/GRAPH_REPORT.md"
-  [ -f "$final/graph.html" ] || fail "Graphify did not create expected output: $final/graph.html"
+  GRAPHIFY_OUT="$final" run_graphify extract "$project" --out "$output" --code-only
+  [ -f "$final/graph.json" ] && [ ! -L "$final/graph.json" ] || fail "Graphify did not create expected output: $final/graph.json"
+  valid_node_link_graph "$final/graph.json" || fail "Graphify created invalid node-link JSON: $final/graph.json"
   say "INDEXED code-only graph: $final"
+  if [ -f "$final/GRAPH_REPORT.md" ]; then
+    say "REPORT generated during extraction: $final/GRAPH_REPORT.md"
+    return 0
+  fi
+  if GRAPHIFY_OUT="$final" run_graphify cluster-only "$output" --graph "$final/graph.json" --no-label --no-viz; then
+    report_status=generated
+  else
+    report_status=unavailable
+  fi
+  if [ "$report_status" = generated ] && [ -f "$final/GRAPH_REPORT.md" ] && [ ! -L "$final/GRAPH_REPORT.md" ]; then
+    say "REPORT generated without labels or visualization: $final/GRAPH_REPORT.md"
+  else
+    say "WARNING: Graph extraction succeeded, but the optional report could not be generated: $final/GRAPH_REPORT.md" >&2
+  fi
+}
+
+query_project() {
+  local selected="$1" question="$2" budget="$3" selected_output="$4" project='' graph=''
+  [ -n "$question" ] || fail 'Query requires a question in quotes'
+  resolve_project_graph "$selected" "$selected_output"
+  say "Querying Graphify graph: $graph"
+  if [ -n "$budget" ]; then
+    run_graphify query "$question" --budget "$budget" --graph "$graph"
+  else
+    run_graphify query "$question" --graph "$graph"
+  fi
+}
+
+report_project() {
+  local selected="$1" selected_output="$2" project='' graph='' output final
+  resolve_project_graph "$selected" "$selected_output"
+  output="${graph%/graphify-out/graph.json}"
+  final="$output/graphify-out"
+  say "Generating code-only architecture report from existing graph: $graph"
+  GRAPHIFY_OUT="$final" run_graphify cluster-only "$output" --graph "$graph" --no-label --no-viz
+  [ -f "$final/GRAPH_REPORT.md" ] && [ ! -L "$final/GRAPH_REPORT.md" ] || fail "Graphify did not create the expected report: $final/GRAPH_REPORT.md"
+  say "REPORT: $final/GRAPH_REPORT.md"
+}
+
+open_graph_html() {
+  local html="$1" os
+  if [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}${VSCODE_AGENT_FOLDER:-}${VSCODE_IPC_HOOK_CLI:-}${REMOTE_CONTAINERS:-}" ]; then
+    say "Remote session detected; not launching a browser. Open this remote file in VS Code: $html"
+    return 0
+  fi
+  os="$(uname -s)"
+  if [ "$os" = Darwin ]; then
+    command -v open >/dev/null 2>&1 || { say "WARNING: No macOS browser opener found; HTML: $html" >&2; return 0; }
+    open "$html" || say "WARNING: Browser could not open the generated HTML: $html" >&2
+  elif [ "$os" = Linux ]; then
+    if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+      say "No desktop display detected; not launching a browser. HTML: $html"
+    elif command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$html" || say "WARNING: Browser could not open the generated HTML: $html" >&2
+    elif command -v gio >/dev/null 2>&1; then
+      gio open "$html" || say "WARNING: Browser could not open the generated HTML: $html" >&2
+    else
+      say "WARNING: No Linux browser opener found; HTML: $html" >&2
+    fi
+  else
+    say "WARNING: Browser opening is unsupported on $os; HTML: $html" >&2
+  fi
+}
+
+visualize_project() {
+  local selected="$1" should_open="$2" selected_output="$3" project='' graph='' final html
+  resolve_project_graph "$selected" "$selected_output"
+  final="$(dirname "$graph")"
+  html="$final/graph.html"
+  say "Generating native Graphify visualization from existing graph: $graph"
+  (cd "$(dirname "$final")" && GRAPHIFY_OUT="$final" run_graphify export html --graph "$graph")
+  [ -f "$html" ] && [ ! -L "$html" ] || fail "Graphify did not create the expected visualization: $html"
+  say "VISUALIZATION: $html"
+  if [ "$should_open" -eq 1 ]; then open_graph_html "$html"; fi
 }
 
 usage() {
-  printf 'Usage: %s {install|repair|check-update|upgrade|verify|remove|rollback|index} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
+  printf 'Usage: %s {install|repair|check-update|upgrade|verify|remove|rollback|index|query|report|visualize} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
   exit 1
 }
 
@@ -567,13 +673,23 @@ dry=0
 project=''
 output=''
 backup=''
+question=''
+budget=''
+should_open=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1 ;;
     --project) shift; [ "$#" -gt 0 ] || usage; project="$1" ;;
     --output) shift; [ "$#" -gt 0 ] || usage; output="$1" ;;
+    --budget) shift; [ "$#" -gt 0 ] || usage; budget="$1" ;;
+    --open) should_open=1 ;;
     --*) usage ;;
-    *) [ "$action" = rollback ] && [ -z "$backup" ] || usage; backup="$1" ;;
+    *)
+      if [ "$action" = rollback ] && [ -z "$backup" ]; then backup="$1"
+      elif [ "$action" = query ] && [ -z "$question" ]; then question="$1"
+      else usage
+      fi
+      ;;
   esac
   shift
 done
@@ -586,6 +702,13 @@ case "$action" in
   verify) [ "$dry" -eq 0 ] && [ -z "$project$output$backup" ] || usage; verify_tool ;;
   remove) [ -z "$project$output$backup" ] || usage; remove_tool "$dry" ;;
   rollback) [ -z "$project$output" ] || usage; rollback_tool "$dry" "$backup" ;;
-  index) [ -z "$backup" ] || usage; index_project "$dry" "$project" "$output" ;;
+  index) [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; index_project "$dry" "$project" "$output" ;;
+  query)
+    [ "$dry" -eq 0 ] && [ -z "$backup" ] && [ "$should_open" -eq 0 ] || usage
+    case "$budget" in ''|*[!0-9]*|0*) [ -z "$budget" ] || usage ;; esac
+    query_project "$project" "$question" "$budget" "$output"
+    ;;
+  report) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; report_project "$project" "$output" ;;
+  visualize) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] || usage; visualize_project "$project" "$should_open" "$output" ;;
   *) usage ;;
 esac
