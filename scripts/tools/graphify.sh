@@ -11,9 +11,18 @@ PINNED_WHEEL_SHA256="$WHEEL_SHA256"
 STAGE=''
 INSTALL_TARGET=''
 RESTORE_BACKUP=''
+INSTALL_LOG=''
+verbose=0
 
 say() { printf '%s\n' "$*"; }
-fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  if [ -n "${INSTALL_LOG:-}" ]; then
+    printf 'Details: %s\n' "$INSTALL_LOG" >&2
+    if [ -s "$INSTALL_LOG" ] && [ "${verbose:-0}" -eq 0 ]; then tail -n 20 "$INSTALL_LOG" >&2; fi
+  fi
+  exit 1
+}
 
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -173,6 +182,24 @@ run_graphify() {
     "$graphify" "$@"
 }
 
+run_graphify_checked() {
+  local operation="$1" command="$2" status=0
+  shift 2
+  run_graphify "$command" "$@" || status=$?
+  [ "$status" -eq 0 ] || fail "Graphify $operation failed (exit $status)"
+}
+
+run_install_step() {
+  local label="$1" status=0
+  shift
+  if [ "$verbose" -eq 1 ]; then
+    "$@" 2>&1 | tee -a "$INSTALL_LOG" || status=$?
+  else
+    "$@" >> "$INSTALL_LOG" 2>&1 || status=$?
+  fi
+  [ "$status" -eq 0 ] || fail "$label failed (exit $status)"
+}
+
 valid_node_link_graph() {
   [ -f "$1" ] && [ ! -L "$1" ] &&
     "$tool_dir/venv/bin/python" -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); assert isinstance(data.get("nodes"), list) and isinstance(data.get("links"), list)' "$1" >/dev/null 2>&1
@@ -184,6 +211,8 @@ project_index_root() {
   key="$(printf '%s' "$project" | cksum | awk '{print $1}')"
   printf '%s/dev-agent-config/graphify/indexes/%s-%s\n' "$data_home" "$name" "$key"
 }
+
+expected_index_marker() { printf 'project=%s\n' "$project"; }
 
 resolve_project_graph() {
   local selected="$1" output="${2:-}" output_physical
@@ -198,6 +227,7 @@ resolve_project_graph() {
   case "$output_physical" in "$project"|"$project"/*) fail 'Managed Graphify output must be outside the source project' ;; esac
   graph="$output/graphify-out/graph.json"
   [ -f "$graph" ] && [ ! -L "$graph" ] || fail "No indexed Graphify graph for this project: $graph. Run '$ROOT/scripts/tools.sh graphify index --project '$project'' first."
+  resolve_active_release || fail 'No validated active Graphify installation is recorded; install Graphify first'
   healthy || fail "Graphify $PACKAGE_VERSION is not installed and healthy"
   valid_node_link_graph "$graph" || fail "Invalid Graphify node-link graph (expected nodes and links arrays): $graph. Re-index this project with '$ROOT/scripts/tools.sh graphify index --project '$project'' (and its original --output root, if customized)."
 }
@@ -305,7 +335,7 @@ for f in data["urls"]:
         print("\t".join((v,f["filename"],f["url"],f["digests"]["sha256"])))
         break
 else: raise SystemExit("no supported universal wheel")
-')" || return 1
+  ' 2>> "${INSTALL_LOG:-/dev/null}")" || return 1
   IFS="$(printf '\t')" read -r latest_version latest_file latest_url latest_hash <<EOF
 $result
 EOF
@@ -328,6 +358,16 @@ load_current_release() {
   set_release "$version" "$file" "$url" "$hash"
 }
 
+# Existing-installation operations must use the release recorded by the manager,
+# never the trusted fresh-install fallback in tool.conf.
+resolve_active_release() {
+  if [ ! -e "$current_release" ] && [ ! -L "$current_release" ]; then return 1; fi
+  load_current_release || fail "Active Graphify release metadata is missing, unsafe, or invalid: $current_release"
+  validate_path "$tool_dir"
+  [ "$(path_type "$tool_dir")" = directory ] || fail "Active Graphify installation is missing or conflicting: $tool_dir"
+  marker_valid || fail "Active Graphify ownership metadata is missing or changed: $marker"
+}
+
 new_backup() {
   local action="$1" backup type saved
   backup="$state_dir/backups/$(date +%Y%m%d-%H%M%S)-$$-$action"
@@ -336,6 +376,7 @@ new_backup() {
   saved="$backup/original"
   if [ "$type" != missing ]; then cp -a "$tool_dir" "$saved"; fi
   if [ -f "$current_release" ] && [ ! -L "$current_release" ]; then cp "$current_release" "$backup/previous-release.tsv"; fi
+  printf '%s\t%s\t%s\t%s\n' "$PACKAGE_VERSION" "$WHEEL_FILE" "$WHEEL_URL" "$WHEEL_SHA256" > "$backup/release.tsv"
   {
     printf 'tool\tversion\taction\ttype\ttarget\tbackup\n'
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$TOOL_NAME" "$PACKAGE_VERSION" "$action" "$type" "$tool_dir" "$saved"
@@ -347,9 +388,8 @@ new_backup() {
 
 install_tool() {
   local dry="$1" operation="${2:-install}" python wheel actual backup release_tmp had_current=0
-  if load_current_release; then
+  if resolve_active_release; then
     had_current=1
-    validate_path "$tool_dir"
     if [ "$operation" = repair ]; then
       marker_valid || fail "Refusing to repair a directory without valid manager ownership: $tool_dir"
       if healthy; then say "UNCHANGED Graphify $PACKAGE_VERSION is already healthy"; return; fi
@@ -360,6 +400,15 @@ install_tool() {
       say "Run '$ROOT/scripts/tools.sh graphify check-update' to check for a newer stable release."
       return
     fi
+  elif [ -e "$current_release" ] || [ -L "$current_release" ]; then
+    fail "Could not resolve the recorded Graphify installation: $current_release"
+  elif [ "$operation" = upgrade ]; then
+    fail 'Cannot upgrade Graphify because no validated active installation is recorded; use install first'
+  fi
+  if [ "$dry" -eq 0 ]; then
+    mkdir -p "$state_dir/logs"
+    INSTALL_LOG="$state_dir/logs/install-$(date +%Y%m%d-%H%M%S)-$$.log"
+    : > "$INSTALL_LOG"
   fi
   preflight || fail 'Graphify prerequisites are not ready; no download or installation was attempted'
   python="$PREFLIGHT_PYTHON"
@@ -412,7 +461,7 @@ install_tool() {
   STAGE="$(mktemp -d "$tool_parent/.graphify-$PACKAGE_VERSION.staging.XXXXXX")"
   printf '%s\n' "$PACKAGE_VERSION" > "$STAGE/.dev-agent-config-stage"
   ensure_venv_pip "$python" "$STAGE/download-venv" || fail 'Could not create the temporary download environment after preflight'
-  "$STAGE/download-venv/bin/python" -m pip download --disable-pip-version-check --no-deps --dest "$STAGE" "$WHEEL_URL"
+  run_install_step 'Graphify wheel download' "$STAGE/download-venv/bin/python" -m pip download --disable-pip-version-check --no-deps --dest "$STAGE" "$WHEEL_URL"
   wheel="$STAGE/$WHEEL_FILE"
   [ -f "$wheel" ] || fail "Downloaded wheel not found: $wheel"
   actual="$(sha256_file "$wheel")"
@@ -424,7 +473,7 @@ install_tool() {
   mkdir -p "$tool_dir"
   printf '%s\n' "$PACKAGE_VERSION" > "$tool_dir/.dev-agent-config-installing"
   ensure_venv_pip "$python" "$tool_dir/venv" || fail 'Could not create the permanent Graphify virtual environment with pip'
-  "$tool_dir/venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
+  run_install_step 'Graphify installation' "$tool_dir/venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
   [ "$("$tool_dir/venv/bin/python" -c 'from importlib.metadata import version; print(version("graphifyy"))')" = "$PACKAGE_VERSION" ] || fail 'Installed package version mismatch'
   [ -x "$graphify" ] || fail 'Graphify console script was not installed'
   entrypoint_healthy || fail "Graphify console script has a missing interpreter: $(entrypoint_interpreter || printf unknown)"
@@ -432,7 +481,13 @@ install_tool() {
     *"$PACKAGE_VERSION"*) ;;
     *) fail 'Graphify CLI version check failed' ;;
   esac
-  "$tool_dir/venv/bin/python" -m pip freeze --all > "$tool_dir/dependencies.txt"
+  if [ "$verbose" -eq 1 ]; then
+    "$tool_dir/venv/bin/python" -m pip freeze --all 2>&1 | tee "$tool_dir/dependencies.txt" | tee -a "$INSTALL_LOG" || fail 'Dependency recording failed'
+  elif "$tool_dir/venv/bin/python" -m pip freeze --all > "$tool_dir/dependencies.txt" 2>> "$INSTALL_LOG"; then
+    cat "$tool_dir/dependencies.txt" >> "$INSTALL_LOG"
+  else
+    fail 'Dependency recording failed'
+  fi
   expected_marker > "$tool_dir/.dev-agent-config-tool"
   printf '%s\t%s\t%s\t%s\n' "$PACKAGE_VERSION" "$WHEEL_FILE" "$WHEEL_URL" "$WHEEL_SHA256" > "$tool_dir/release.tsv"
   cleanup_stage || fail 'Could not clean verified download staging directory'
@@ -445,12 +500,13 @@ install_tool() {
   RESTORE_BACKUP=''
   say "INSTALLED Graphify $PACKAGE_VERSION"
   say "Dependencies: $tool_dir/dependencies.txt"
+  say "Install log: $INSTALL_LOG"
   say "Rollback: $ROOT/scripts/tools.sh graphify rollback '$backup'"
 }
 
 check_update() {
   local python current='not installed'
-  if load_current_release; then current="$PACKAGE_VERSION"; fi
+  if resolve_active_release; then current="$PACKAGE_VERSION"; fi
   if ! python="$(python_command)"; then fail 'Update checking requires Python 3.10 or newer'; fi
   resolve_latest_release "$python" || fail 'Could not resolve the latest stable Graphify release from PyPI'
   say "Current Graphify: $current"
@@ -462,7 +518,7 @@ check_update() {
 
 verify_tool() {
   local interpreter
-  load_current_release || set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
+  if ! resolve_active_release; then say 'Graphify: not installed'; return 1; fi
   validate_path "$tool_dir"
   case "$(path_type "$tool_dir")" in
     missing) say "Graphify $PACKAGE_VERSION: not installed"; return 1 ;;
@@ -486,7 +542,7 @@ verify_tool() {
 
 remove_tool() {
   local dry="$1" backup
-  load_current_release || set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
+  if ! resolve_active_release; then say 'UNCHANGED Graphify: not installed'; return; fi
   validate_path "$tool_dir"
   case "$(path_type "$tool_dir")" in
     missing) say "UNCHANGED Graphify $PACKAGE_VERSION: not installed"; return ;;
@@ -516,7 +572,16 @@ rollback_tool() {
   IFS="$(printf '\t')" read -r tool version action type target saved <<EOF
 $line
 EOF
-  if load_current_release; then :
+  if [ -f "$backup/release.tsv" ] && [ ! -L "$backup/release.tsv" ]; then
+    IFS="$(printf '\t')" read -r release_version release_file release_url release_hash < "$backup/release.tsv"
+    case "$release_version" in *[!0-9.]*|'') fail 'Backup release metadata is invalid' ;; esac
+    [ "$release_file" = "graphifyy-$release_version-py3-none-any.whl" ] || fail 'Backup wheel metadata is invalid'
+    case "$release_url" in https://files.pythonhosted.org/*) ;; *) fail 'Backup source metadata is invalid' ;; esac
+    case "$release_hash" in *[!0-9a-f]*|'') fail 'Backup digest metadata is invalid' ;; esac
+    [ "${#release_hash}" -eq 64 ] || fail 'Backup digest metadata is invalid'
+    set_release "$release_version" "$release_file" "$release_url" "$release_hash"
+  elif [ -e "$current_release" ] || [ -L "$current_release" ]; then
+    load_current_release || fail 'Current release metadata is invalid; refusing legacy backup rollback'
   elif [ -f "$saved/release.tsv" ] && [ ! -L "$saved/release.tsv" ]; then
     IFS="$(printf '\t')" read -r release_version release_file release_url release_hash < "$saved/release.tsv"
     case "$release_version" in *[!0-9.]*|'') fail 'Backup release metadata is invalid' ;; esac
@@ -525,8 +590,10 @@ EOF
     case "$release_hash" in *[!0-9a-f]*|'') fail 'Backup digest metadata is invalid' ;; esac
     [ "${#release_hash}" -eq 64 ] || fail 'Backup digest metadata is invalid'
     set_release "$release_version" "$release_file" "$release_url" "$release_hash"
-  else
+  elif [ "$version" = "$PINNED_VERSION" ]; then
     set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
+  else
+    fail 'Backup release metadata is missing or unsafe'
   fi
   [ "$tool" = "$TOOL_NAME" ] && [ "$version" = "$PACKAGE_VERSION" ] && [ "$target" = "$tool_dir" ] || fail 'Backup does not match this managed Graphify installation'
   [ "$saved" = "$backup/original" ] || fail 'Backup contains an unexpected restore path'
@@ -563,8 +630,8 @@ EOF
 }
 
 index_project() {
-  local dry="$1" project="$2" output="$3" final output_physical report_status
-  load_current_release || set_release "$PINNED_VERSION" "$PINNED_WHEEL_FILE" "$PINNED_WHEEL_URL" "$PINNED_WHEEL_SHA256"
+  local dry="$1" project="$2" output="$3" final output_physical report_status index_marker
+  resolve_active_release || fail 'No validated active Graphify installation is recorded; install Graphify first'
   [ -n "$project" ] || fail 'Indexing requires --project PATH'
   [ -d "$project" ] && [ ! -L "$project" ] || fail "Project must be a real directory, not a symlink: $project"
   project="$(cd "$project" && pwd -P)"
@@ -578,13 +645,18 @@ index_project() {
   case "$output_physical" in "$project"|"$project"/*) fail 'Graphify output must be outside the source project' ;; esac
   healthy || fail "Graphify $PACKAGE_VERSION is not installed and healthy"
   final="$output/graphify-out"
+  index_marker="$final/.dev-agent-config-index"
+  if [ -e "$index_marker" ] || [ -L "$index_marker" ]; then
+    [ -f "$index_marker" ] && [ ! -L "$index_marker" ] && expected_index_marker | cmp -s - "$index_marker" || fail "Graph output ownership conflict: $index_marker"
+  fi
   say "$( [ "$dry" -eq 1 ] && printf WOULD_INDEX || printf INDEXING ) code: $project"
   say "Graph output: $final"
   [ "$dry" -eq 0 ] || return 0
   mkdir -p "$output"
-  GRAPHIFY_OUT="$final" run_graphify extract "$project" --out "$output" --code-only
+  GRAPHIFY_OUT="$final" run_graphify_checked 'code-only extraction' extract "$project" --out "$output" --code-only
   [ -f "$final/graph.json" ] && [ ! -L "$final/graph.json" ] || fail "Graphify did not create expected output: $final/graph.json"
   valid_node_link_graph "$final/graph.json" || fail "Graphify created invalid node-link JSON: $final/graph.json"
+  expected_index_marker > "$index_marker"
   say "INDEXED code-only graph: $final"
   if [ -f "$final/GRAPH_REPORT.md" ]; then
     say "REPORT generated during extraction: $final/GRAPH_REPORT.md"
@@ -602,16 +674,53 @@ index_project() {
   fi
 }
 
+clean_project() {
+  local dry="$1" selected="$2" output="$3" project='' expected='' final='' marker='' entry base
+  [ -n "$selected" ] || fail 'Clean requires --project PATH'
+  [ -d "$selected" ] && [ ! -L "$selected" ] || fail "Project must be a real directory, not a symlink: $selected"
+  project="$(cd "$selected" && pwd -P)"
+  expected="$(project_index_root "$project")"
+  [ -n "$output" ] || output="$expected"
+  case "$output" in /*) ;; *) fail "Output root must be absolute: $output" ;; esac
+  output="${output%/}"
+  validate_path "$output/graphify-out"
+  case "$(physical_path "$output")" in "$project"|"$project"/*) fail 'Graphify output must be outside the source project' ;; esac
+  final="$output/graphify-out"
+  case "$(path_type "$final")" in
+    missing) say "UNCHANGED: no generated Graphify index at $final"; return ;;
+    directory) ;;
+    *) fail "Refusing unsafe generated index path: $final ($(path_type "$final"))" ;;
+  esac
+  marker="$final/.dev-agent-config-index"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && expected_index_marker | cmp -s - "$marker" || fail "Index ownership metadata is missing, changed, or belongs to another project: $marker"
+  else
+    [ "$output" = "$expected" ] && [ -f "$final/graph.json" ] && [ ! -L "$final/graph.json" ] || fail "Cannot safely identify this index. Re-index this project with the manager, then retry clean."
+  fi
+  for entry in "$final"/* "$final"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    case "$base" in graph.json|GRAPH_REPORT.md|graph.html|.dev-agent-config-index) ;; *) fail "Refusing to delete unrecognized index data: $entry" ;; esac
+    [ -f "$entry" ] && [ ! -L "$entry" ] || fail "Refusing unsafe index entry: $entry"
+  done
+  say "$( [ "$dry" -eq 1 ] && printf WOULD_CLEAN || printf CLEANING ) generated Graphify index: $final"
+  [ "$dry" -eq 0 ] || return 0
+  rm -f -- "$final/graph.json" "$final/GRAPH_REPORT.md" "$final/graph.html" "$marker"
+  rmdir "$final" || fail "Index files were removed, but unexpected data remains in: $final"
+  say "CLEANED generated Graphify index for $project; Graphify remains installed"
+}
+
 query_project() {
   local selected="$1" question="$2" budget="$3" selected_output="$4" project='' graph=''
   [ -n "$question" ] || fail 'Query requires a question in quotes'
   resolve_project_graph "$selected" "$selected_output"
   say "Querying Graphify graph: $graph"
   if [ -n "$budget" ]; then
-    run_graphify query "$question" --budget "$budget" --graph "$graph"
+    run_graphify_checked query query "$question" --budget "$budget" --graph "$graph"
   else
-    run_graphify query "$question" --graph "$graph"
+    run_graphify_checked query query "$question" --graph "$graph"
   fi
+  say "QUERY completed: $graph"
 }
 
 report_project() {
@@ -620,7 +729,7 @@ report_project() {
   output="${graph%/graphify-out/graph.json}"
   final="$output/graphify-out"
   say "Generating code-only architecture report from existing graph: $graph"
-  GRAPHIFY_OUT="$final" run_graphify cluster-only "$output" --graph "$graph" --no-label --no-viz
+  GRAPHIFY_OUT="$final" run_graphify_checked report cluster-only "$output" --graph "$graph" --no-label --no-viz
   [ -f "$final/GRAPH_REPORT.md" ] && [ ! -L "$final/GRAPH_REPORT.md" ] || fail "Graphify did not create the expected report: $final/GRAPH_REPORT.md"
   say "REPORT: $final/GRAPH_REPORT.md"
 }
@@ -656,14 +765,14 @@ visualize_project() {
   final="$(dirname "$graph")"
   html="$final/graph.html"
   say "Generating native Graphify visualization from existing graph: $graph"
-  (cd "$(dirname "$final")" && GRAPHIFY_OUT="$final" run_graphify export html --graph "$graph")
+  (cd "$(dirname "$final")" && GRAPHIFY_OUT="$final" run_graphify_checked visualization export html --graph "$graph")
   [ -f "$html" ] && [ ! -L "$html" ] || fail "Graphify did not create the expected visualization: $html"
   say "VISUALIZATION: $html"
   if [ "$should_open" -eq 1 ]; then open_graph_html "$html"; fi
 }
 
 usage() {
-  printf 'Usage: %s {install|repair|check-update|upgrade|verify|remove|rollback|index|query|report|visualize} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
+  printf 'Usage: %s {install|repair|check-update|upgrade|verify|remove|rollback|index|query|report|visualize|clean} [OPTIONS]\n' "$ROOT/scripts/tools.sh graphify" >&2
   exit 1
 }
 
@@ -683,6 +792,7 @@ while [ "$#" -gt 0 ]; do
     --output) shift; [ "$#" -gt 0 ] || usage; output="$1" ;;
     --budget) shift; [ "$#" -gt 0 ] || usage; budget="$1" ;;
     --open) should_open=1 ;;
+    --verbose) verbose=1 ;;
     --*) usage ;;
     *)
       if [ "$action" = rollback ] && [ -z "$backup" ]; then backup="$1"
@@ -710,5 +820,6 @@ case "$action" in
     ;;
   report) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; report_project "$project" "$output" ;;
   visualize) [ "$dry" -eq 0 ] && [ -z "$backup$budget$question" ] || usage; visualize_project "$project" "$should_open" "$output" ;;
+  clean) [ -z "$backup$budget$question" ] && [ "$should_open" -eq 0 ] || usage; clean_project "$dry" "$project" "$output" ;;
   *) usage ;;
 esac

@@ -14,8 +14,8 @@ cat > "$fakebin/python3" <<'PYTHON'
 set -euo pipefail
 if [ "${1:-}" = -c ]; then
   case "${2:-}" in
-    *urlopen*) printf '%s\tgraphifyy-%s-py3-none-any.whl\thttps://files.pythonhosted.org/packages/test/graphifyy-%s.whl\t04e5a44c0ff94554315e03d39d8eccfddb2850b77837ede23d75f0f63dc4e66d\n' "${FAKE_LATEST_VERSION:-0.9.88}" "${FAKE_LATEST_VERSION:-0.9.88}" "${FAKE_LATEST_VERSION:-0.9.88}" ;;
-    *'a=tuple'*) [[ "$3" > "$4" ]] ;;
+    *urlopen*) [ "${FAKE_PYPI_FAIL:-0}" != 1 ] || { printf 'unexpected PyPI lookup\n' >&2; exit 77; }; printf '%s\tgraphifyy-%s-py3-none-any.whl\thttps://files.pythonhosted.org/packages/test/graphifyy-%s-py3-none-any.whl\t04e5a44c0ff94554315e03d39d8eccfddb2850b77837ede23d75f0f63dc4e66d\n' "${FAKE_LATEST_VERSION:-0.9.88}" "${FAKE_LATEST_VERSION:-0.9.88}" "${FAKE_LATEST_VERSION:-0.9.88}" ;;
+    *'a=tuple'*) case "$3:$4" in 0.9.89:0.9.88|0.9.90:0.9.88|0.9.90:0.9.89) exit 0 ;; *) exit 1 ;; esac ;;
     *'version("graphifyy")'*) if [ -f "$(dirname "$0")/VERSION" ]; then cat "$(dirname "$0")/VERSION"; else printf '%s\n' "${FAKE_LATEST_VERSION:-0.9.88}"; fi ;;
     *json.load*) case "$(tr -d '[:space:]' < "$3")" in *'"nodes":['*'"links":['*) ;; *) exit 1 ;; esac ;;
     *sys.version_info*) printf '3.11.0\n' ;;
@@ -37,13 +37,15 @@ if [ "${1:-}" = -m ] && [ "${2:-}" = ensurepip ]; then
 fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ] && [ "${3:-}" = download ]; then
   [ "$0" != "$FAKE_PYTHON" ] || exit 6
+  printf 'Collecting graphifyy fixture dependency\n'
   dest=''
   while [ "$#" -gt 0 ]; do
     [ "$1" != --dest ] || { shift; dest="$1"; }
+    case "$1" in https://files.pythonhosted.org/*) wheel_name="${1##*/}" ;; esac
     shift
   done
   mkdir -p "$dest"
-  printf 'fixture wheel\n' > "$dest/graphifyy-${FAKE_LATEST_VERSION:-0.9.88}-py3-none-any.whl"
+  printf 'fixture wheel\n' > "$dest/${wheel_name:-graphifyy-${FAKE_LATEST_VERSION:-0.9.88}-py3-none-any.whl}"
   exit 0
 fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
@@ -56,6 +58,7 @@ if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
   cat >> "$dest/bin/graphify" <<'GRAPHIFY'
 set -euo pipefail
 if [ "${1:-}" = --version ]; then printf 'graphify %s\n' "$(cat "$(dirname "$0")/VERSION")"; exit 0; fi
+printf '%s %s\n' "$(cat "$(dirname "$0")/VERSION")" "$*" >> "${FAKE_GRAPHIFY_LOG:?}.versions"
 if [ "${1:-}" = extract ]; then
   [ "${3:-}" = --out ] && [ "${5:-}" = --code-only ] || { printf 'bad args: %s\n' "$*" >&2; exit 3; }
   for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY MOONSHOT_API_KEY DEEPSEEK_API_KEY AWS_ACCESS_KEY_ID OLLAMA_BASE_URL; do
@@ -77,6 +80,7 @@ elif [ "${1:-}" = cluster-only ]; then
   [ "${FAKE_REPORT_FAIL:-0}" != 1 ] || exit 6
   printf '# report\n' > "$GRAPHIFY_OUT/GRAPH_REPORT.md"
 elif [ "${1:-}" = query ]; then
+  [ "${FAKE_QUERY_FAIL:-0}" != 1 ] || { printf 'fixture query failed\n' >&2; exit 12; }
   [ "${GRAPHIFY_QUERY_LOG_DISABLE:-}" = 1 ] || exit 7
   [ -z "${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}${AWS_ACCESS_KEY_ID:-}${OLLAMA_BASE_URL:-}" ] || exit 10
   printf '%s\n' "$*" >> "${FAKE_GRAPHIFY_LOG:?}"
@@ -86,6 +90,7 @@ elif [ "${1:-}" = export ] && [ "${2:-}" = html ]; then
   printf '%s\n' "$*" >> "${FAKE_GRAPHIFY_LOG:?}"
   printf '<html>fixture graph</html>\n' > "$GRAPHIFY_OUT/graph.html"
 else
+  printf 'unexpected fake graphify invocation: %s\n' "$*" >&2
   exit 2
 fi
 GRAPHIFY
@@ -93,7 +98,9 @@ GRAPHIFY
   exit 0
 fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ] && [ "${3:-}" = install ]; then
-  [ "${FAKE_STAGE_FAIL:-0}" != 1 ] || exit 8
+  [ "${FAKE_STAGE_FAIL:-0}" != 1 ] || { printf 'fixture wheel install failed\n' >&2; exit 8; }
+  printf 'Installing collected packages: graphifyy\n'
+  for arg in "$@"; do case "$arg" in *.whl) printf '%s\n' "$arg" | sed -n 's#.*graphifyy-\([0-9.]*\)-py3-none-any\.whl#\1#p' > "$(dirname "$0")/VERSION" ;; esac; done
   exit 0
 fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ] && [ "${3:-}" = freeze ]; then
@@ -187,7 +194,9 @@ if FAKE_CLEANUP_FAIL=1 run_tool "$home" install --dry-run >/dev/null 2>&1; then 
 [ ! -e "$(tool_dir "$home")" ]
 
 home="$(new_home staging-failure)"
-if FAKE_STAGE_FAIL=1 run_tool "$home" install >/dev/null 2>&1; then echo 'Staging failure was accepted' >&2; exit 1; fi
+if FAKE_STAGE_FAIL=1 run_tool "$home" install >"$home/install-failure.out" 2>&1; then echo 'Staging failure was accepted' >&2; exit 1; fi
+grep -q 'Details: .*install-.*\.log' "$home/install-failure.out"
+grep -q 'fixture wheel install failed' "$home/install-failure.out"
 [ ! -e "$(tool_dir "$home")" ]
 [ ! -e "$home/state/dev-agent-config/tools/graphify/current-release.tsv" ]
 
@@ -216,6 +225,17 @@ repeat_output="$(run_tool "$home" install)"
 case "$repeat_output" in UNCHANGED*) ;; *) echo 'Repeated install was not unchanged' >&2; exit 1 ;; esac
 after="$(find "$home/state/dev-agent-config/tools/graphify/backups" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 [ "$before" = "$after" ]
+
+# Installation output stays concise unless verbose mode is explicitly requested.
+home="$(new_home install-output)"
+install_output="$(run_tool "$home" install)"
+case "$install_output" in *'Collecting graphifyy'*) echo 'Routine pip output leaked by default' >&2; exit 1 ;; esac
+case "$install_output" in *'INSTALLED Graphify 0.9.88'*'Install log:'*) ;; *) echo 'Install summary omitted version or log path' >&2; exit 1 ;; esac
+install_log="$(printf '%s\n' "$install_output" | sed -n 's/^Install log: //p')"
+grep -q 'Collecting graphifyy' "$install_log"
+home="$(new_home install-verbose)"
+verbose_output="$(run_tool "$home" install --verbose)"
+case "$verbose_output" in *'Collecting graphifyy'*'Installing collected packages'*) ;; *) echo 'Verbose install omitted pip diagnostics' >&2; exit 1 ;; esac
 
 # Update checks are read-only; upgrades are explicit and roll back to the prior release.
 update_output="$(FAKE_LATEST_VERSION=0.9.89 run_tool "$home" check-update)"
@@ -317,6 +337,8 @@ case "$query_output" in *'query fixture output'*) ;; *) echo 'Query did not run 
 grep -qFx "query where is the fixture symbol? --budget 640 --graph $indexed_graph" "$home/graphify.log"
 run_tool "$home" query --project "$project" test --output "$output" >/dev/null
 grep -qFx "query test --graph $output/graphify-out/graph.json" "$home/graphify.log"
+if FAKE_QUERY_FAIL=1 run_tool "$home" query --project "$project" failure > "$home/query-failure.out" 2>&1; then echo 'Graphify query failure was hidden' >&2; exit 1; fi
+grep -q 'ERROR: Graphify query failed' "$home/query-failure.out"
 extract_count="$(grep -c '^extract ' "$home/graphify.log")"
 run_tool "$home" report --project "$project" >/dev/null
 [ -f "$indexed_root/graphify-out/GRAPH_REPORT.md" ]
@@ -338,6 +360,45 @@ grep -q 'No desktop display detected' "$home/headless-visualize.out"
 [ "$browser_count" = "$(wc -l < "$home/graphify.log.browser" | tr -d ' ')" ]
 [ "$extract_count" = "$(grep -c '^extract ' "$home/graphify.log")" ]
 
+# The installed release, not tool.conf's older fresh-install fallback, drives
+# every operation against an existing installation.
+home_active="$(new_home active-version)"
+FAKE_LATEST_VERSION=0.9.89 run_tool "$home_active" install >/dev/null
+active_project="$home_active/project"
+mkdir -p "$active_project"
+FAKE_PYPI_FAIL=1 run_tool "$home_active" verify | grep 'Graphify 0.9.89: healthy' >/dev/null
+FAKE_PYPI_FAIL=1 run_tool "$home_active" index --project "$active_project" >/dev/null
+active_root="$(project_index_root "$active_project")"
+FAKE_PYPI_FAIL=1 run_tool "$home_active" query --project "$active_project" 'active version?' >/dev/null
+FAKE_PYPI_FAIL=1 run_tool "$home_active" report --project "$active_project" >/dev/null
+FAKE_PYPI_FAIL=1 run_tool "$home_active" visualize --project "$active_project" >/dev/null
+run_tool "$home_active" check-update | grep 'Current Graphify: 0.9.89' >/dev/null
+grep -q '^0.9.89 extract ' "$home_active/graphify.log.versions"
+grep -q '^0.9.89 query ' "$home_active/graphify.log.versions"
+grep -q '^0.9.89 cluster-only ' "$home_active/graphify.log.versions"
+grep -q '^0.9.89 export html ' "$home_active/graphify.log.versions"
+active_entrypoint="$(tool_dir "$home_active" 0.9.89)/venv/bin/graphify"
+sed '1c\
+#!/missing/active-graphify-interpreter
+' "$active_entrypoint" > "$home_active/broken-entrypoint"
+chmod +x "$home_active/broken-entrypoint"
+mv "$home_active/broken-entrypoint" "$active_entrypoint"
+FAKE_PYPI_FAIL=1 run_tool "$home_active" repair >/dev/null
+run_tool "$home_active" verify | grep 'Graphify 0.9.89: healthy' >/dev/null
+FAKE_LATEST_VERSION=0.9.88 run_tool "$home_active" upgrade >"$home_active/no-downgrade.out" 2>&1
+grep 'already current' "$home_active/no-downgrade.out" >/dev/null || { cat "$home_active/no-downgrade.out" >&2; exit 1; }
+verify_active="$(run_tool "$home_active" verify)"
+case "$verify_active" in *'Graphify 0.9.89: healthy'*) ;; *) printf '%s\n' "$verify_active" >&2; exit 1 ;; esac
+FAKE_LATEST_VERSION=0.9.90 run_tool "$home_active" upgrade >/dev/null
+run_tool "$home_active" verify | grep 'Graphify 0.9.90: healthy' >/dev/null
+upgrade_backup="$(sed -n '1p' "$home_active/state/dev-agent-config/tools/graphify/last-backup")"
+run_tool "$home_active" rollback "$upgrade_backup" >/dev/null
+run_tool "$home_active" verify | grep 'Graphify 0.9.89: healthy' >/dev/null
+FAKE_PYPI_FAIL=1 run_tool "$home_active" remove >/dev/null
+remove_backup="$(sed -n '1p' "$home_active/state/dev-agent-config/tools/graphify/last-backup")"
+run_tool "$home_active" rollback "$remove_backup" >/dev/null
+run_tool "$home_active" verify | grep 'Graphify 0.9.89: healthy' >/dev/null
+
 home_missing="$(new_home graph-operations-missing)"
 run_tool "$home_missing" install >/dev/null
 mkdir -p "$home_missing/project"
@@ -355,5 +416,37 @@ rm "$indexed_graph"
 printf '{"nodes":{},"links":[]}\n' > "$indexed_graph"
 if run_tool "$home" query --project "$project" test > "$home/invalid-query.out" 2>&1; then echo 'Query accepted an invalid node-link graph' >&2; exit 1; fi
 grep -q 'expected nodes and links arrays' "$home/invalid-query.out"
+
+# Project-scoped clean removes only the recognized generated subtree.
+home_clean="$(new_home clean-index)"
+run_tool "$home_clean" install >/dev/null
+clean_project="$home_clean/project"
+clean_output="$home_clean/custom-graphs/nest"
+mkdir -p "$clean_project"
+printf 'keep source\n' > "$clean_project/app.ts"
+run_tool "$home_clean" index --project "$clean_project" --output "$clean_output" >/dev/null
+run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" --dry-run | grep 'WOULD_CLEAN' >/dev/null
+[ -f "$clean_output/graphify-out/graph.json" ]
+run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" >/dev/null
+[ ! -e "$clean_output/graphify-out" ]
+[ -f "$(tool_dir "$home_clean")/venv/bin/graphify" ]
+grep -qFx 'keep source' "$clean_project/app.ts"
+run_tool "$home_clean" clean --project "$clean_project" --output "$clean_output" | grep 'no generated Graphify index' >/dev/null
+mkdir -p "$home_clean/unrelated/graphify-out"
+printf '{}\n' > "$home_clean/unrelated/graphify-out/graph.json"
+if run_tool "$home_clean" clean --project "$clean_project" --output "$home_clean/unrelated" >/dev/null 2>&1; then echo 'Clean accepted an unowned custom index' >&2; exit 1; fi
+run_tool "$home_clean" index --project "$clean_project" >/dev/null
+saved_home="$home"
+home="$home_clean"
+clean_default="$(project_index_root "$clean_project")/graphify-out"
+home="$saved_home"
+printf 'foreign\n' > "$home_clean/foreign-file"
+ln -s "$home_clean/foreign-file" "$clean_default/graph.html"
+if run_tool "$home_clean" clean --project "$clean_project" >/dev/null 2>&1; then echo 'Clean accepted a symlink conflict' >&2; exit 1; fi
+grep -qFx foreign "$home_clean/foreign-file"
+rm "$clean_default/graph.html"
+printf 'project=/some/other/project\n' > "$clean_default/.dev-agent-config-index"
+if run_tool "$home_clean" clean --project "$clean_project" >/dev/null 2>&1; then echo 'Clean accepted changed ownership metadata' >&2; exit 1; fi
+[ -f "$clean_default/graph.json" ]
 
 echo 'PASS tools: install, repeat, corruption, symlinks, rollback, remove, code-only index'

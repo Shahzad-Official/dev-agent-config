@@ -105,6 +105,9 @@ environment:
 ./scripts/tools.sh graphify verify
 ```
 
+Add `--verbose` to a fresh `install` command to stream pip's download and
+installation details.
+
 Fresh installation resolves the latest non-prerelease release and universal wheel
 from the authoritative PyPI JSON API. If metadata lookup is unavailable, it falls
 back safely to the retained `graphifyy==0.9.88` pin under
@@ -129,6 +132,10 @@ are not fully hash-locked. Review `dependencies.txt` when reproducibility or
 supply-chain policy requires a complete dependency lock.
 
 Routine install and verify operations never upgrade a healthy installation.
+Local operations use the version in validated manager metadata and do not
+contact PyPI. A healthy install is unchanged by routine install. Successful
+install output is concise; failures point to a retained log under the Graphify
+manager state directory, and `--verbose` streams pip details.
 Update checking is read-only, and upgrades must be explicit:
 
 ```bash
@@ -197,6 +204,8 @@ need to locate `graph.json` yourself:
 ./scripts/tools.sh graphify report --project /path/to/project
 ./scripts/tools.sh graphify visualize --project /path/to/project
 ./scripts/tools.sh graphify visualize --project /path/to/project --open
+./scripts/tools.sh graphify clean --project /path/to/project --dry-run
+./scripts/tools.sh graphify clean --project /path/to/project
 ```
 
 For a graph created with a custom `index --output /path/to/output-root`, pass that
@@ -212,6 +221,11 @@ to launch a remote browser. In VS Code Remote SSH, open the printed absolute pat
 from the remote workspace's File > Open File dialog (or the Remote Explorer); the
 HTML is stored under the remote user's XDG data directory, not inside the source
 repository. Supply `--output` when the graph was indexed to a custom output root.
+
+`clean` removes only the selected project's generated `graphify-out` files (or
+the explicitly supplied custom output's generated index), after checking the
+project mapping/ownership marker and rejecting symlink or unexpected-file
+conflicts. It does not remove Graphify itself; `remove` does not clean indexes.
 
 Removal is limited to an installation carrying unchanged manager ownership
 metadata:
