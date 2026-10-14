@@ -17,6 +17,9 @@ grep -q 'serve \[--project PATH\]' "$SANDBOX/graphify-help"
 grep -q 'run \[--project PATH\]' "$SANDBOX/graphify-help"
 "$ROOT/dev-agent-config" tools codebase-memory-mcp --help > "$SANDBOX/cbm-help"
 grep -q 'adopt \[--dry-run\]' "$SANDBOX/cbm-help"
+grep -q 'run \[--dry-run\]' "$SANDBOX/cbm-help"
+"$ROOT/dev-agent-config" cbm --help > "$SANDBOX/cbm-run-help"
+grep -q 'Bootstrap CBM for the current Git repository' "$SANDBOX/cbm-run-help"
 
 HOME="$home" PATH=/usr/bin:/bin "$ROOT/dev-agent-config" cli install --dry-run --bin-dir "$home/bin" > "$SANDBOX/dry"
 [ ! -e "$home/bin/dev-agent-config" ]

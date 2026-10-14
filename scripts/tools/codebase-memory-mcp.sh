@@ -59,6 +59,8 @@ Commands:
   service install [--port N] [--dry-run]
   service enable|disable|verify|remove [--dry-run]
   watcher status | watcher set {enabled|disabled} [--dry-run]
+  run [--dry-run] [--no-dashboard] [--no-mcp] [--agent codex|opencode] [--refresh] [--port N]
+                               Bootstrap CBM for the current Git repository
 
 Adoption never installs, moves, or owns the CBM binary. MCP changes preserve
 unrelated settings. Project cleanup only targets manager-mapped CBM indexes.
@@ -472,7 +474,12 @@ mcp_present_in_config() {
   # Detection only; Codex CLI remains the sole writer. Catch the canonical
   # entry and custom-named MCP entries that reference CBM, without parsing TOML.
   awk '
-    /^\[mcp_servers\./ { in_mcp=1; next }
+    /^\[mcp_servers\./ {
+      in_mcp=1; key=$0
+      sub(/^\[mcp_servers\./,"",key); sub(/\]$/,"",key); gsub(/"/,"",key)
+      if (key == "codebase-memory-mcp") found=1
+      next
+    }
     /^\[/ { in_mcp=0 }
     in_mcp && /codebase-memory-mcp/ { found=1 }
     END { exit !found }
@@ -625,9 +632,10 @@ mcp_status() {
 }
 
 write_codex_fallback_entry() {
-  local binary="$1" escaped temp
+  local binary="$1" escaped temp env_vars=''
   command -v python3 >/dev/null 2>&1 || die 'Codex CLI is absent and safe config-file fallback requires Python 3'
   escaped="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$binary")"
+  [ -z "${CBM_CACHE_DIR:-}" ] || env_vars='env_vars = ["CBM_CACHE_DIR"]'
   [ ! -L "$CODEX_HOME" ] || die "Refusing symlink Codex home: $CODEX_HOME"
   [ ! -L "$CODEX_CONFIG" ] || die "Refusing symlink Codex config: $CODEX_CONFIG"
   [ ! -e "$CODEX_CONFIG" ] || [ -f "$CODEX_CONFIG" ] || die "Codex config is not a regular file: $CODEX_CONFIG"
@@ -637,7 +645,7 @@ write_codex_fallback_entry() {
   if [ -f "$CODEX_CONFIG" ]; then cp -p "$CODEX_CONFIG" "$temp"; else : > "$temp"; chmod 600 "$temp"; fi
   {
     [ ! -s "$temp" ] || printf '\n'
-    printf '# >>> dev-agent-config CBM >>>\n[mcp_servers.codebase-memory-mcp]\ncommand = %s\nargs = []\n# <<< dev-agent-config CBM <<<\n' "$escaped"
+    printf '# >>> dev-agent-config CBM >>>\n[mcp_servers.codebase-memory-mcp]\ncommand = %s\nargs = []\n%s\n# <<< dev-agent-config CBM <<<\n' "$escaped" "$env_vars"
   } >> "$temp"
   mv "$temp" "$CODEX_CONFIG"
 }
@@ -703,7 +711,9 @@ opencode_mcp_enable() {
   opencode_python
   safe_user_path "$OPENCODE_CONFIG"
   [ ! -L "$OPENCODE_CONFIG" ] || die "Refusing symlink OpenCode config: $OPENCODE_CONFIG"
-  if is_owned_opencode_entry; then say "UNCHANGED: OpenCode MCP '$SERVER_NAME' is already enabled and manager-owned"; return; fi
+  if is_owned_opencode_entry; then
+    say "UNCHANGED: OpenCode MCP '$SERVER_NAME' is already enabled and manager-owned"; return
+  fi
   if [ -e "$OPENCODE_OWNERSHIP" ] || [ -L "$OPENCODE_OWNERSHIP" ]; then die "Stale or unexpected OpenCode ownership metadata: $OPENCODE_OWNERSHIP"; fi
   if [ -e "$OPENCODE_CONFIG" ]; then
     [ -f "$OPENCODE_CONFIG" ] || die "OpenCode config is not a regular file: $OPENCODE_CONFIG"
@@ -722,11 +732,13 @@ PY
   backup="$(backup_opencode_config)"
   tmp="$OPENCODE_CONFIG.tmp.$$"
   mkdir -p "$(dirname "$OPENCODE_CONFIG")"
-  python3 - "$OPENCODE_CONFIG" "$tmp" "$binary" <<'PY'
+  python3 - "$OPENCODE_CONFIG" "$tmp" "$binary" "${CBM_CACHE_DIR:-}" <<'PY'
 import json, pathlib, sys
-src,dst,binary=sys.argv[1:]
+src,dst,binary,cache_dir=sys.argv[1:]
 data=json.loads(pathlib.Path(src).read_text()) if pathlib.Path(src).exists() else {}
-data.setdefault("mcp",{})["codebase-memory-mcp"]={"type":"local","command":[binary],"enabled":True}
+entry={"type":"local","command":[binary],"enabled":True}
+if cache_dir: entry["environment"]={"CBM_CACHE_DIR":cache_dir}
+data.setdefault("mcp",{})["codebase-memory-mcp"]=entry
 pathlib.Path(dst).write_text(json.dumps(data,indent=2)+"\n")
 PY
   if [ -f "$OPENCODE_CONFIG" ]; then
@@ -784,12 +796,13 @@ PY
 }
 
 mcp_enable() {
-  local dry=0 arg binary version backup current snapshot_mode
+  local dry=0 arg binary version backup current snapshot_mode mode
   for arg in "$@"; do case "$arg" in --dry-run) dry=1 ;; *) usage 2 ;; esac; done
   binary="$(integration_binary)"
   version="$(version_of "$binary" 2>/dev/null)" || die "CBM --version health check failed: $binary"
   if mcp_get >/dev/null 2>&1 || mcp_present_in_config; then
-    if is_owned_mcp; then say "UNCHANGED: Codex MCP '$SERVER_NAME' is already enabled and manager-owned"
+    if is_owned_mcp; then
+      say "UNCHANGED: Codex MCP '$SERVER_NAME' is already enabled and manager-owned"
     else say "EXTERNAL: Codex MCP entry exists; it was not modified or adopted"; fi
     return
   fi
@@ -800,7 +813,9 @@ mcp_enable() {
   [ "$dry" -eq 1 ] && { say "WOULD_ENABLE Codex MCP '$SERVER_NAME' -> $binary"; say "Config: $CODEX_CONFIG"; return; }
   backup="$(backup_config)"
   if command -v codex >/dev/null 2>&1; then
-    codex_cli mcp add "$SERVER_NAME" -- "$binary" || die "Codex CLI failed to add MCP entry. Original config backup: $backup"
+    if [ -n "${CBM_CACHE_DIR:-}" ]; then
+      codex_cli mcp add "$SERVER_NAME" --env "CBM_CACHE_DIR=$CBM_CACHE_DIR" -- "$binary" || die "Codex CLI failed to add MCP entry. Original config backup: $backup"
+    else codex_cli mcp add "$SERVER_NAME" -- "$binary" || die "Codex CLI failed to add MCP entry. Original config backup: $backup"; fi
     current="$(mcp_get 2>/dev/null)" || die "Codex did not report the new MCP entry; backup: $backup"
     snapshot_mode=codex-cli
     current="$(printf '%s' "$current" | cksum | awk '{print $1 ":" $2}')"
@@ -1165,11 +1180,12 @@ dashboard_start() {
   binary="$(selected_binary)"
   name="$(project_existing_name "$project" "$binary" 2>/dev/null || true)"
   [ -n "$name" ] || die "Project has no CBM index: $project; run index --project "$project" first"
+  encoded="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")"
   if [ -e "$DASHBOARD_META" ] || [ -L "$DASHBOARD_META" ]; then
     if dashboard_owned_process "$(dashboard_pid)" "$(dashboard_nonce)"; then
       [ "$(awk -F '\t' '$1=="project_path"{print $2}' "$DASHBOARD_META")" = "$project" ] &&
         [ "$(awk -F '\t' '$1=="port"{print $2}' "$DASHBOARD_META")" = "$port" ] &&
-        { say "UNCHANGED: dashboard already serving $project on port $port"; return; }
+        { say "UNCHANGED: dashboard already serving $project on port $port"; say "URL: http://127.0.0.1:$port/?project=$encoded"; return; }
       die 'Another manager-owned dashboard is running; stop it before starting a different project or port'
     fi
     dashboard_status >/dev/null
@@ -1177,7 +1193,6 @@ dashboard_start() {
   fi
   port_is_free "$port" || die "Port $port is already in use; choose another port"
   url="http://127.0.0.1:$port"
-  encoded="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")"
   [ "$dry" -eq 0 ] || { say "WOULD_START CBM dashboard for $project"; say "URL: $url/?project=$encoded"; say "CBM executable: $binary"; return; }
   command -v python3 >/dev/null 2>&1 || die 'Dashboard lifecycle requires Python 3'
   [ -f "$RUNNER" ] && [ ! -L "$RUNNER" ] || die "Dashboard runner is unavailable: $RUNNER"
@@ -1455,12 +1470,251 @@ service_remove() {
   say "REMOVED manager-owned dashboard service definition: $path"
 }
 
+agent_available() {
+  case "$1" in
+    codex) command -v codex >/dev/null 2>&1 || [ -d "$CODEX_HOME" ] || [ -f "$CODEX_CONFIG" ] ;;
+    opencode) command -v opencode >/dev/null 2>&1 || [ -d "$(dirname "$OPENCODE_CONFIG")" ] || [ -f "$OPENCODE_CONFIG" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+run_freshness() {
+  python3 -c 'import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: raise SystemExit("unknown")
+if not isinstance(d,dict): print("unknown"); raise SystemExit
+targets=[d]
+for key in ("index","index_status","freshness"):
+ value=d.get(key) if isinstance(d,dict) else None
+ if isinstance(value,dict): targets.append(value)
+for value in targets:
+ if any(value.get(key) is True for key in ("stale","is_stale")): print("stale"); raise SystemExit
+ for key in ("freshness","sync_status","state","status"):
+  item=value.get(key)
+  if isinstance(item,str) and item.lower() in ("stale","outdated","needs_refresh"): print("stale"); raise SystemExit
+print("not-confirmed-stale")' "$1"
+}
+
+run_watch_evidence() {
+  local binary="$1" json="$2" strategy watcher auto
+  watcher="$("$binary" config get watcher_enabled 2>/dev/null || printf unavailable)"
+  auto="$("$binary" config get auto_watch 2>/dev/null || printf unavailable)"
+  strategy="$(python3 -c 'import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: d={}
+w=d.get("watch",{}) if isinstance(d,dict) else {}
+print(w.get("strategy","not-reported") if isinstance(w,dict) else "not-reported")' "$json")"
+  say "Watcher configuration: watcher_enabled=$watcher, auto_watch=$auto (runtime activity unverified)"
+  case "$strategy" in
+    git|tree) say "Project watcher registration: CBM reports strategy=$strategy; poller health unverified" ;;
+    pending) say 'Project watcher registration: pending first poll' ;;
+    none) say 'Project watcher registration: not active (strategy=none)' ;;
+    *) say 'Project watcher registration: not reported by this CBM version' ;;
+  esac
+  say 'Source-change synchronization: not verified by this bootstrap run'
+}
+
+run_summary() {
+  say 'CBM bootstrap summary:'
+  say "  project: $1"
+  say "  binary: $2 ($3)"
+  say "  MCP: $4"
+  say "  index: $5"
+  say "  dashboard: $6"
+  say '  watcher: configuration/registration evidence reported above; future synchronization unverified'
+}
+
+reuse_managed_service() {
+  local project_name="$1" port="$2" path state encoded
+  [ -z "${CBM_CACHE_DIR:-}" ] || return 1
+  path="$(service_definition_path 2>/dev/null)" || return 1
+  service_owned "$path" || return 1
+  [ "$(awk -F '\t' '$1=="port"{print $2}' "$SERVICE_META")" = "$port" ] || return 1
+  state="$(service_manager_state "$path" 2>/dev/null)" || return 1
+  [ "$state" = active ] || return 1
+  port_is_open "$port" || return 1
+  encoded="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$project_name")"
+  printf 'http://127.0.0.1:%s/?project=%s\n' "$port" "$encoded"
+}
+
+cbm_run() {
+  local dry=0 no_dashboard=0 no_mcp=0 force_refresh=0 port=9749 arg project active binary version ownership
+  local agent mcp_summary='skipped by --no-mcp' output found requested_count=0 candidate_count=0 dashboard_url=disabled
+  local -a requested=() candidates=()
+  while [ "$#" -gt 0 ]; do
+    arg="$1"; shift
+    case "$arg" in
+      -h|--help|help) usage 0 ;;
+      --dry-run) dry=1 ;;
+      --no-dashboard) no_dashboard=1 ;;
+      --no-mcp) no_mcp=1 ;;
+      --refresh) force_refresh=1 ;;
+      --agent)
+        [ "$#" -gt 0 ] || die '--agent requires codex or opencode'
+        case "$1" in codex|opencode) ;; *) die "Unsupported CBM MCP agent: $1 (supported: codex, opencode)" ;; esac
+        requested+=("$1"); requested_count=$((requested_count + 1)); shift
+        ;;
+      --port) [ "$#" -gt 0 ] || die '--port requires a number'; port="$1"; shift ;;
+      --port=*) port="$(printf '%s' "$arg" | cut -d= -f2-)" ;;
+      *) usage 2 ;;
+    esac
+  done
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "Invalid TCP port: $port"
+  project="$(project_from_args)"
+  say "Project: $project"
+  if [ -n "${CBM_CACHE_DIR:-}" ]; then say "CBM cache/runtime selection: explicit CBM_CACHE_DIR=$CBM_CACHE_DIR"; fi
+
+  active="$(active_version 2>/dev/null || true)"
+  if [ -e "$ACTIVE_FILE" ] || [ -L "$ACTIVE_FILE" ]; then
+    [ -n "$active" ] || die 'CBM manager metadata is invalid; run tools codebase-memory-mcp verify before bootstrap'
+  fi
+  if [ -n "$active" ]; then
+    binary="$(selected_binary)"
+    version="$(version_of "$binary" 2>/dev/null)" || die "Managed CBM $active failed --version verification"
+    case "$version" in *"$active"*) ;; *) die "Managed CBM version mismatch: metadata=$active, executable=$version" ;; esac
+    ownership='manager-owned'
+    say "CBM binary: $version ($ownership; $binary)"
+  else
+    found="$(find_binary)"
+    if [ -n "$found" ]; then
+      binary="$(resolved_binary "$found" 2>/dev/null)" || die "Existing CBM path is broken or unsafe: $found; repair it manually before bootstrap"
+      version="$(version_of "$binary" 2>/dev/null)" || die "Existing CBM binary failed --version: $binary; it was left untouched"
+      ownership="$(adoption_state)"
+      [ "$ownership" = external ] || ownership='external (ownership not adopted)'
+      say "CBM binary: $version ($ownership; $binary)"
+    elif [ "$dry" -eq 1 ]; then
+      binary='not installed'; version="$VERSION"; ownership='would install manager-owned'
+      say "CBM binary: WOULD_INSTALL pinned $version (official SHA-256 verification required)"
+    else
+      say "Installing official pinned CBM $VERSION..."
+      install_version "$VERSION" 0
+      binary="$(selected_binary)"
+      version="$(version_of "$binary" 2>/dev/null)" || die 'Installed CBM failed final --version verification'
+      ownership='manager-owned'
+      say "CBM binary: $version ($ownership; $binary)"
+    fi
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    bash "$ROOT/scripts/install.sh" --mode=merge --dry-run || die 'Global instruction dry-run failed'
+    say 'Global instructions: planned'
+  else
+    bash "$ROOT/scripts/install.sh" --mode=merge || die 'Could not install shared global instructions; project files were not touched'
+    say 'Global instructions: installed/verified through merge installer'
+  fi
+
+  if [ "$dry" -eq 1 ] && [ "$binary" = 'not installed' ] && [ "$no_mcp" -eq 0 ]; then
+    mcp_summary='would configure eligible agent entries after verified install'
+    say "MCP: $mcp_summary"
+  elif [ "$no_mcp" -eq 0 ]; then
+    if [ "$requested_count" -gt 0 ]; then
+      for agent in "${requested[@]}"; do
+        candidates+=("$agent"); candidate_count=$((candidate_count + 1))
+      done
+    else
+      for agent in codex opencode; do
+        if agent_available "$agent"; then candidates+=("$agent"); candidate_count=$((candidate_count + 1)); fi
+      done
+    fi
+    if [ "$candidate_count" -eq 0 ]; then
+      mcp_summary='no supported agent configuration detected'
+      say "MCP: $mcp_summary; pass --agent codex|opencode to select one, or --no-mcp to skip"
+    else
+      mcp_summary=''
+      for agent in "${candidates[@]}"; do
+        if ! agent_available "$agent"; then output="$agent unavailable (not configured/installed); skipped"
+        elif [ "$dry" -eq 1 ]; then
+          if [ "$agent" = codex ]; then output="$(mcp_enable --dry-run 2>&1)" || die "Codex MCP preflight failed: $output"
+          else output="$(opencode_mcp_enable 1 2>&1)" || die "OpenCode MCP preflight failed: $output"; fi
+        else
+          if [ "$agent" = codex ]; then output="$(mcp_enable 2>&1)" || die "Codex MCP setup failed: $output"
+          else output="$(opencode_mcp_enable 0 2>&1)" || die "OpenCode MCP setup failed: $output"; fi
+        fi
+        if [ -n "$mcp_summary" ]; then mcp_summary+='; '; fi
+        case "$output" in
+          *EXTERNAL*|*'externally managed'*)
+            mcp_summary+="$agent externally managed (preserved)"
+            [ -z "${CBM_CACHE_DIR:-}" ] || mcp_summary+="; verify its existing entry uses CBM_CACHE_DIR=$CBM_CACHE_DIR"
+            ;;
+          *UNCHANGED*) mcp_summary+="$agent already configured" ;;
+          *ENABLED*) mcp_summary+="$agent configured" ;;
+          *WOULD_ENABLE*) mcp_summary+="$agent would configure" ;;
+          *) mcp_summary+="$agent: $output" ;;
+        esac
+        say "MCP $agent: $output"
+      done
+    fi
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    index_state='not queried (dry-run does not contact CBM runtime)'
+    say 'Index: WOULD_CHECK; index only if missing'
+    [ "$force_refresh" -eq 0 ] || say 'Refresh: explicitly requested'
+    if [ "$no_dashboard" -eq 0 ]; then
+      say "Dashboard: WOULD_START_OR_REUSE http://127.0.0.1:$port (no process started)"
+      dashboard_url="http://127.0.0.1:$port (planned)"
+    fi
+    say 'Watcher configuration/registration: not queried during dry-run'
+    run_summary "$project" "$version" "$ownership" "$mcp_summary" "$index_state" "$dashboard_url"
+    return
+  fi
+
+  if ! list_json="$(project_list_json "$binary" 2>&1)"; then
+    die "CBM project check failed: $list_json. No process was stopped. Check '$binary daemon status'; resolve any build/cache mismatch explicitly, then rerun."
+  fi
+  project_list_complete "$list_json" || die 'CBM project listing is incomplete or unparseable; refusing to mistake an unknown index for a missing one'
+  existing="$(project_name_for_path "$list_json" "$project" 2>/dev/null || true)"
+  if [ -z "$existing" ]; then
+    say 'Index: missing; indexing project now'
+    run_project_index index "$project" "$binary" || die "Index failed for $project; no dashboard was started"
+    list_json="$(project_list_json "$binary" 2>&1)" || die 'CBM indexing returned success but project verification failed; check daemon/cache compatibility'
+    project_list_complete "$list_json" || die 'CBM indexing returned success but project listing could not verify the resulting index'
+    name="$(project_name_for_path "$list_json" "$project" 2>/dev/null || true)"
+    [ -n "$name" ] || die "Index command returned success but CBM did not register $project; inspect '$binary daemon status' and retry"
+    index_state="indexed ($name)"
+    status_json="$("$binary" cli --quiet index_status --project "$name" --format json 2>&1)" || die "Indexed project could not provide status: $status_json"
+  else
+    name="$existing"
+    if ! status_json="$("$binary" cli --quiet index_status --project "$name" --format json 2>&1)"; then
+      die "Could not read CBM freshness for $project: $status_json. The existing index was left unchanged; check '$binary daemon status'."
+    fi
+    freshness="$(run_freshness "$status_json")"
+    if [ "$force_refresh" -eq 1 ] || [ "$freshness" = stale ]; then
+      if [ "$force_refresh" -eq 1 ]; then say 'Index: refresh explicitly requested'
+      else say 'Index: CBM confirmed stale; refreshing'; fi
+      run_project_index refresh "$project" "$binary" || die "Refresh failed for $project; the dashboard was not started"
+      index_state="refreshed ($name; $freshness)"
+      status_json="$("$binary" cli --quiet index_status --project "$name" --format json 2>&1)" || die 'Refresh succeeded but follow-up index status failed'
+    else
+      index_state="present ($name; stale state not confirmed, no refresh performed)"
+    fi
+  fi
+  say "Index: $index_state"
+  run_watch_evidence "$binary" "$status_json"
+
+  if [ "$no_dashboard" -eq 0 ]; then
+    if dashboard_url="$(reuse_managed_service "$name" "$port" 2>/dev/null)"; then
+      say "Dashboard: reused active manager-owned service"
+    else
+      if ! output="$(dashboard_start --project "$project" --port "$port" 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        die 'Dashboard setup failed safely; no external process was stopped. Resolve the port/process conflict, or rerun with --no-dashboard.'
+      fi
+      say "Dashboard: $output"
+      dashboard_url="$(printf '%s\n' "$output" | sed -n 's/^URL: //p' | tail -n 1)"
+      [ -n "$dashboard_url" ] || dashboard_url="http://127.0.0.1:$port"
+    fi
+  fi
+  run_summary "$project" "$version" "$ownership" "$mcp_summary" "$index_state" "$dashboard_url"
+}
+
 TAB="$(printf '\t')"
 action="${1:-}"
 [ -n "$action" ] || usage 2
 shift
 case "$action" in
   -h|--help|help) usage 0 ;;
+  run) cbm_run "$@" ;;
   status)
     if [ "$#" -eq 0 ]; then status
     else project="$(project_from_args "$@")"; project_status "$project" "$(selected_binary)"; fi

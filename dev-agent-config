@@ -24,18 +24,24 @@ Commands:
   benchmark REPOSITORY OUTPUT_DIR             Prepare isolated benchmark fixtures
   tools <tool> <action> [options]             Manage optional tools
   tools codebase-memory-mcp <command>         Detect/adopt CBM; manage Codex MCP explicitly
+  cbm run [--dry-run] [--no-dashboard] [--no-mcp] [--agent codex|opencode] [--refresh]
+                                               Bootstrap CBM for the current Git project
   graphify <action> [options]                  Manage Graphify; 'run' prepares and serves a project graph
   cli install|uninstall [options]              Add/remove this command in a user bin directory
   help                                        Show this help
 
 Use 'dev-agent-config graphify --help' for Graphify commands.
 Use 'dev-agent-config tools codebase-memory-mcp --help' for CBM commands.
+Use 'dev-agent-config cbm --help' for the CBM project bootstrap workflow.
 The user-level CLI link defaults to ~/.local/bin; this does not edit shell startup files.
 EOF
 }
 
 command="${1:-help}"
 shift || true
+if [ "$command" = cbm ] && { [ "${1:-}" = -h ] || [ "${1:-}" = --help ] || [ "${1:-}" = help ]; }; then
+  exec bash "$ROOT/scripts/tools.sh" codebase-memory-mcp --help
+fi
 if [ "$command" != graphify ] && { [ "${1:-}" = -h ] || [ "${1:-}" = --help ]; }; then help; exit 0; fi
 case "$command" in
   help|-h|--help) help ;;
@@ -45,6 +51,10 @@ case "$command" in
   uninstall) exec bash "$ROOT/scripts/uninstall.sh" "$@" ;;
   benchmark) exec bash "$ROOT/scripts/benchmark.sh" "$@" ;;
   tools) exec bash "$ROOT/scripts/tools.sh" "$@" ;;
+  cbm)
+    [ "${1:-}" = run ] && shift || :
+    exec bash "$ROOT/scripts/tools.sh" codebase-memory-mcp run "$@"
+    ;;
   graphify) exec bash "$ROOT/scripts/tools.sh" graphify "$@" ;;
   cli)
     action="${1:-}"

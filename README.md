@@ -38,6 +38,7 @@ From a checkout, use the executable at the repository root:
 ./dev-agent-config --help
 ./dev-agent-config verify
 ./dev-agent-config graphify --help
+./dev-agent-config cbm --help
 ```
 
 To make `dev-agent-config` available without the checkout's full path, create a
@@ -422,6 +423,43 @@ dev-agent-config tools codebase-memory-mcp adopt --dry-run
 dev-agent-config tools codebase-memory-mcp adopt
 ```
 
+### One-command project bootstrap
+
+From any Git repository, bootstrap its CBM setup with:
+
+```bash
+cd /path/to/your-git-project
+dev-agent-config cbm run --dry-run
+dev-agent-config cbm run
+```
+
+The run command verifies an existing binary (including an external one), or
+installs the verified pinned release if no binary exists. It merges the global
+shared instructions without touching the project's `AGENTS.md`; configures MCP
+only for detected Codex/OpenCode installations, preserving any external CBM
+entry; indexes only when the project is missing; and refreshes only when CBM
+reports a stale state or `--refresh` is explicitly passed. Repeated runs do not
+reinstall or re-index a healthy project. `--agent codex` or `--agent opencode`
+limits MCP setup to that available agent; unsupported/missing agents are never
+configured. Use `--no-mcp` or `--no-dashboard` to skip either action, and
+`--port 8080` to choose a dashboard port.
+
+```bash
+dev-agent-config cbm run --dry-run --no-mcp --no-dashboard
+dev-agent-config cbm run --agent codex --refresh
+dev-agent-config cbm run --no-dashboard
+```
+
+Dry-run plans installation and global configuration changes but does not
+download files, call CBM project/status commands, alter indexes, or start a
+dashboard. It therefore reports index state as unchecked. A real run reports
+watcher settings separately from CBM's project registration strategy; neither
+is proof that future file changes are detected and reindexed. An occupied port
+is never taken over: use `--no-dashboard`, choose another port, or inspect the
+existing listener. Incompatible CBM runtime/cache conflicts are left to CBM's
+admission checks; the manager does not stop or kill daemons and directs you to
+`codebase-memory-mcp daemon status` for diagnosis.
+
 Codex MCP management respects `CODEX_HOME` (default `~/.codex`). When the
 Codex CLI is present, the manager uses its documented MCP commands; without the
 CLI it can add a marked TOML block so the Codex VS Code extension can use the
@@ -640,6 +678,7 @@ bash tests/test_tools.sh
 bash tests/test_cbm.sh
 bash tests/test_cbm_projects.sh
 bash tests/test_cbm_service.sh
+bash tests/test_cbm_run.sh
 bash tests/smoke.sh
 ```
 
@@ -647,6 +686,7 @@ Tests use temporary HOME directories and remove them afterward. They cover fresh
 installation, merge, replace, adapters, repeated installation, symlink conflicts,
 rollback, uninstall, benchmark isolation, conditional code-intelligence links,
 CBM install/MCP fixtures, project mapping and cleanup, dashboard ownership and
-port-conflict fixtures, watcher evidence reporting, and isolated Graphify tool management.
+port-conflict fixtures, watcher evidence reporting, one-command CBM bootstrap
+and isolated cache fixtures, and isolated Graphify tool management.
 Service-definition tests use fake service-manager commands and do not install
 systemd units, launch agents, or persistent services.
