@@ -1275,7 +1275,7 @@ dashboard_status() {
 }
 
 dashboard_start() {
-  local port=9749 project='' dry=0 arg binary name nonce pid log url encoded kind attempt
+  local port=9749 project='' dry=0 arg binary name nonce pid log url encoded kind attempt ready=0 daemon_log
   while [ "$#" -gt 0 ]; do
     arg="$1"; shift
     case "$arg" in
@@ -1312,32 +1312,13 @@ dashboard_start() {
       return
       ;;
     starting)
-      say "CBM's compatible internal daemon is binding port $port; waiting briefly for its UI to become healthy or release the port..."
-      attempt=0
-      while [ "$attempt" -lt 20 ]; do
-        sleep 0.25
-        kind="$(dashboard_port_kind "$port" "$binary")"
-        case "$kind" in
-          free) break ;;
-          healthy)
-            url="$(dashboard_url_for "$name" "$port")"
-            say 'UNCHANGED: CBM UI became healthy on the shared daemon (not manager-owned)'
-            say "URL: $url"
-            return
-            ;;
-          starting) ;;
-          unrelated) die "Port $port changed to an unrelated or incompatible listener while waiting; no process was stopped" ;;
-          *) die "Port $port is occupied but its listener cannot be verified; install lsof/fuser or inspect it manually. Nothing was stopped" ;;
-        esac
-        attempt=$((attempt + 1))
-      done
-      [ "$kind" = free ] || die "CBM's internal daemon kept port $port but its UI did not become healthy within 5 seconds; no process was stopped. Check the CBM daemon log under the selected cache, or retry with --port N after it exits."
+      say "A matching CBM daemon currently owns port $port without a ready UI; starting a persistent UI session to join or establish the shared daemon safely."
       ;;
     unrelated) die "Port $port is occupied by a non-CBM or incompatible process; choose another port. Nothing was stopped" ;;
     unknown) die "Port $port is occupied but its process could not be verified safely; install lsof/fuser or inspect it manually. Nothing was stopped" ;;
   esac
   url="http://127.0.0.1:$port"
-  [ "$dry" -eq 0 ] || { say "WOULD_START CBM dashboard for $project"; say "URL: $url/?project=$encoded"; say "CBM executable: $binary"; return; }
+  [ "$dry" -eq 0 ] || { say "WOULD_START CBM dashboard for $project"; say "URL: $url/?project=$encoded"; say "CBM executable: $binary"; [ "$kind" != starting ] || say 'Action: attach a persistent UI session to the compatible CBM daemon'; return; }
   command -v python3 >/dev/null 2>&1 || die 'Dashboard lifecycle requires Python 3'
   [ -f "$RUNNER" ] && [ ! -L "$RUNNER" ] || die "Dashboard runner is unavailable: $RUNNER"
   prepare_state
@@ -1348,16 +1329,32 @@ dashboard_start() {
   nonce="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   nohup python3 "$RUNNER" "$binary" "$port" "$log" "$nonce" >> "$log" 2>&1 </dev/null &
   pid=$!
-  # Wait briefly for the local listener; never treat process creation as readiness.
-  local attempt=0
-  while [ "$attempt" -lt 30 ]; do
-    if port_is_open "$port" >/dev/null 2>&1; then break; fi
+  # A bound port can belong to CBM while its HTTP service is still unavailable.
+  # Keep the manager's UI session alive until the actual CBM endpoint is ready.
+  attempt=0
+  while [ "$attempt" -lt 150 ]; do
+    kind="$(dashboard_port_kind "$port" "$binary")"
+    case "$kind" in
+      healthy) ready=1; break ;;
+      unrelated|unknown) break ;;
+    esac
     kill -0 "$pid" 2>/dev/null || break
-    sleep 0.1; attempt=$((attempt + 1))
+    sleep 0.2; attempt=$((attempt + 1))
   done
-  if ! port_is_open "$port" >/dev/null 2>&1; then
-    kill -TERM "$pid" 2>/dev/null || :
-    die "Dashboard failed to open port $port. Log: $log"
+  if [ "$ready" -ne 1 ]; then
+    if dashboard_owned_process "$pid" "$nonce"; then
+      kill -TERM "$pid" 2>/dev/null || :
+      attempt=0
+      while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 30 ]; do sleep 0.1; attempt=$((attempt + 1)); done
+    fi
+    [ ! -s "$log" ] || tail -n 20 "$log" >&2
+    [ -s "$log" ] || say 'Dashboard runner log is empty; the CBM frontend exited before writing diagnostics.' >&2
+    case "$kind" in
+      unrelated) die "Port $port became owned by an unrelated process; manager runner was stopped only if its identity verified. Log: $log" ;;
+      unknown) die "Port $port is occupied but its process cannot be verified; no external process was stopped. Log: $log" ;;
+    esac
+    daemon_log="${CBM_CACHE_DIR:-$HOME/.cache/codebase-memory-mcp}/logs/cbm-daemon.log"
+    die "CBM dashboard did not return healthy HTTP HTML on port $port within 30 seconds. Manager runner log: $log; CBM daemon log: $daemon_log. Check daemon UI errors/assets and cache-root compatibility."
   fi
   if ! dashboard_owned_process "$pid" "$nonce"; then
     local state=0
@@ -1372,6 +1369,7 @@ dashboard_start() {
   mv "$tmp" "$DASHBOARD_META"
   say "STARTED: CBM dashboard for $project"
   say "URL: $url/?project=$encoded"
+  say "HTTP readiness: healthy"
   say "Stop with: dev-agent-config tools codebase-memory-mcp dashboard stop"
 }
 

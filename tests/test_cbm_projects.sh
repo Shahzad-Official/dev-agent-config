@@ -15,7 +15,8 @@ set -euo pipefail
 if [ "${1:-}" = - ]; then
   source_code="$(cat)"
   case "$source_code" in
-    *'s.bind(("127.0.0.1"'*) [ "${CBM_FAKE_PORT_STATE:-free}" != busy ]; exit ;;
+    *HTTPConnection*) [ -f "${CBM_FAKE_DASHBOARD_READY:-/nonexistent}" ]; exit ;;
+    *'s.bind(("127.0.0.1"'*) [ "${CBM_FAKE_PORT_STATE:-free}" != busy ] && [ ! -f "${CBM_FAKE_DASHBOARD_READY:-/nonexistent}" ]; exit ;;
     *'s.connect(("127.0.0.1"'*) [ "${CBM_FAKE_PORT_STATE:-free}" != busy ]; exit ;;
   esac
   printf '%s\n' "$source_code" | exec "${CBM_REAL_PYTHON:?}" "$@"
@@ -26,15 +27,27 @@ exec "${CBM_REAL_PYTHON:?}" "$@"
 PYSH
 chmod +x "$bin/python3"
 export CBM_REAL_PYTHON="$real_python"
+export CBM_FAKE_DASHBOARD_READY="$home/dashboard-ready" CBM_TEST_BINARY="$bin/codebase-memory-mcp"
 cat > "$bin/ps" <<'PSSH'
 #!/usr/bin/env sh
 if [ -n "${CBM_DAC_EXPECTED_NONCE:-}" ]; then
   printf '%s %s\n' "$CBM_DAC_RUNNER" "$CBM_DAC_EXPECTED_NONCE"
   exit 0
 fi
+if [ -f "${CBM_FAKE_DASHBOARD_READY:-/nonexistent}" ]; then
+  printf '%s --cbm-daemon-internal\n' "${CBM_TEST_BINARY:?}"
+  exit 0
+fi
+if [ "${CBM_FAKE_PORT_STATE:-free}" = busy ]; then echo '/usr/bin/unrelated-listener'; exit 0; fi
 exit 1
 PSSH
 chmod +x "$bin/ps"
+cat > "$bin/lsof" <<'LSS'
+#!/usr/bin/env sh
+if [ -f "${CBM_FAKE_DASHBOARD_READY:-/nonexistent}" ] || [ "${CBM_FAKE_PORT_STATE:-free}" = busy ]; then echo 9876; exit 0; fi
+exit 1
+LSS
+chmod +x "$bin/lsof"
 git -C "$projects/retail api" init -q
 git -C "$projects/other api" init -q
 git -C "$projects/external api" init -q
@@ -51,7 +64,10 @@ cat > "$bin/codebase-memory-mcp" <<'CBM'
 set -euo pipefail
 if [ "${1:-}" = --version ]; then echo 'codebase-memory-mcp v0.11.0'; exit 0; fi
 if [ "${1:-}" = --ui=true ]; then
-  exec sleep 600
+  : > "$CBM_FAKE_DASHBOARD_READY"
+  sleep 600 & child=$!
+  trap 'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; rm -f "$CBM_FAKE_DASHBOARD_READY"; exit 0' TERM INT
+  wait "$child"
 fi
 [ "${1:-}" = cli ] || [ "${1:-}" = config ] || exit 2
 if [ "$1" = config ]; then

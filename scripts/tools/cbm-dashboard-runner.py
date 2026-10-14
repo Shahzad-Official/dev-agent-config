@@ -10,13 +10,23 @@ def main():
         raise SystemExit("usage: cbm-dashboard-runner.py BINARY PORT LOG NONCE")
     binary, port, log_path, _nonce = sys.argv[1:]
     log = open(log_path, "ab", buffering=0)
-    child = subprocess.Popen(
-        [binary, "--ui=true", "--port=" + port],
-        stdin=subprocess.PIPE,
-        stdout=log,
-        stderr=log,
-        start_new_session=True,
-    )
+    def record(message):
+        log.write((message + "\n").encode("utf-8", errors="replace"))
+
+    record("Starting persistent CBM UI session: {} --ui=true --port={}".format(binary, port))
+    try:
+        child = subprocess.Popen(
+            [binary, "--ui=true", "--port=" + port],
+            stdin=subprocess.PIPE,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+    except OSError as error:
+        record("ERROR: could not launch CBM UI session: {}".format(error))
+        log.close()
+        return 1
+    record("CBM UI session process started: {}".format(child.pid))
 
     def stop(_signal, _frame):
         if child.poll() is None:
@@ -25,7 +35,9 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        return child.wait()
+        status = child.wait()
+        record("CBM UI session exited with status {}".format(status))
+        return status
     finally:
         if child.poll() is None:
             child.terminate()

@@ -43,9 +43,10 @@ cat > "$BIN/lsof" <<'SH'
 #!/bin/sh
 case "${CBM_FAKE_PORT_MODE:-}" in
   cbm-transient)
+    if [ -f "${CBM_FAKE_UI_STARTED:-/nonexistent}" ]; then echo 4243; exit 0; fi
     n=0; [ ! -f "$CBM_FAKE_PORT_STATE" ] || n="$(cat "$CBM_FAKE_PORT_STATE")"
     n=$((n + 1)); printf '%s\n' "$n" > "$CBM_FAKE_PORT_STATE"
-    [ "$n" -le 2 ] && echo 4242
+    [ "$n" -le 1 ] && echo 4242
     ;;
   cbm-healthy|cbm-timeout) echo 4242 ;;
   unrelated) echo 4343 ;;
@@ -57,11 +58,18 @@ cat > "$BIN/python3" <<'SH'
 if [ "$1" = - ]; then
   source="$(cat)"
   case "$source" in
-    *"HTTPConnection('127.0.0.1'"*) [ "${CBM_FAKE_UI_HEALTHY:-0}" = 1 ] && exit 0 || exit 1 ;;
-    *'s.bind(("127.0.0.1"'*)
+    *"HTTPConnection('127.0.0.1'"*)
       if [ "${CBM_FAKE_PORT_MODE:-}" = cbm-transient ]; then
         n=0; [ ! -f "$CBM_FAKE_PORT_STATE" ] || n="$(cat "$CBM_FAKE_PORT_STATE")"
-        [ "$n" -lt 3 ] && exit 1
+        [ "$n" -ge 2 ] && exit 0
+      fi
+      if [ "${CBM_FAKE_UI_HEALTHY:-0}" = 1 ] || [ -f "${CBM_FAKE_UI_STARTED:-/nonexistent}" ]; then exit 0; fi
+      exit 1 ;;
+    *'s.bind(("127.0.0.1"'*)
+      if [ "${CBM_FAKE_PORT_MODE:-}" = cbm-transient ]; then
+        if [ -f "${CBM_FAKE_UI_STARTED:-/nonexistent}" ]; then exit 1; fi
+        n=0; [ ! -f "$CBM_FAKE_PORT_STATE" ] || n="$(cat "$CBM_FAKE_PORT_STATE")"
+        [ "$n" -lt 1 ] && exit 1
       elif [ -n "${CBM_FAKE_PORT_MODE:-}" ] || [ "${CBM_FAKE_PORT_BUSY:-0}" = 1 ]; then exit 1; fi
       ;;
   esac
@@ -75,6 +83,12 @@ cat > "$RELEASE/codebase-memory-mcp" <<'CBM'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "$1" = --version ]; then echo 'codebase-memory-mcp v0.11.0'; exit 0; fi
+if [ "$1" = --ui=true ]; then
+  if [ "${CBM_FAKE_PORT_MODE:-}" = cbm-timeout ]; then echo 'ERROR: daemon rejected UI session: cache root mismatch' >&2; exit 17; fi
+  : > "$CBM_FAKE_UI_STARTED"
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
 printf '%s cache=%s\n' "$*" "${CBM_CACHE_DIR:-unset}" >> "$CBM_CALL_LOG"
 [ "$1" = cli ] || [ "$1" = config ] || exit 2
 if [ "$1" = config ]; then
@@ -115,6 +129,7 @@ run() (
     CBM_TEST_BINARY="$home/data/dev-agent-config/tools/codebase-memory-mcp/versions/0.11.0/codebase-memory-mcp" \
     CBM_FAKE_PORT_MODE="${CBM_FAKE_PORT_MODE:-}" CBM_FAKE_UI_HEALTHY="${CBM_FAKE_UI_HEALTHY:-0}" \
     CBM_FAKE_PORT_BUSY="${CBM_FAKE_PORT_BUSY:-0}" CBM_FAKE_PORT_STATE="${CBM_FAKE_PORT_STATE:-$home/port-state}" \
+    CBM_FAKE_UI_STARTED="$home/ui-session-started" \
     CBM_CURL_LOG="$home/curl.log" \
     CBM_TEST_RELEASE="$RELEASE" CBM_REAL_PYTHON="$REAL_PYTHON" PATH="$BIN:/usr/bin:/bin" \
     "$ROOT/dev-agent-config" cbm run "$@"
@@ -127,6 +142,7 @@ run_tool() (
     CBM_TEST_BINARY="$home/data/dev-agent-config/tools/codebase-memory-mcp/versions/0.11.0/codebase-memory-mcp" \
     CBM_FAKE_PORT_MODE="${CBM_FAKE_PORT_MODE:-}" CBM_FAKE_UI_HEALTHY="${CBM_FAKE_UI_HEALTHY:-0}" \
     CBM_FAKE_PORT_BUSY="${CBM_FAKE_PORT_BUSY:-0}" CBM_FAKE_PORT_STATE="${CBM_FAKE_PORT_STATE:-$home/port-state}" \
+    CBM_FAKE_UI_STARTED="$home/ui-session-started" \
     CBM_TEST_RELEASE="$RELEASE" CBM_REAL_PYTHON="$REAL_PYTHON" PATH="$BIN:/usr/bin:/bin" \
     "$ROOT/dev-agent-config" tools codebase-memory-mcp "$@"
 )
@@ -246,25 +262,30 @@ fi
 grep -q 'Dashboard setup failed safely' "$SANDBOX/port-conflict"
 [ ! -e "$meta" ]
 
-# A healthy CBM-owned UI is reused; an indexing daemon's short-lived bind is
-# waited out, while unrelated listeners and stuck daemons are never taken over.
+# A healthy CBM-owned UI is reused. If a short-lived CLI daemon has the port
+# but no UI, attach a persistent UI session and wait for actual HTTP readiness.
 result="$(CBM_FAKE_PORT_MODE=cbm-healthy CBM_FAKE_UI_HEALTHY=1 run_tool "$home" "$project" "$log" dashboard start --port 9749)"
 grep -q 'healthy CBM UI is already served by the shared daemon' <<< "$result"
 [ ! -e "$meta" ]
 result="$(CBM_FAKE_PORT_MODE=cbm-healthy CBM_FAKE_UI_HEALTHY=1 run_tool "$home" "$project" "$log" dashboard status)"
 grep -q 'healthy (shared CBM daemon; not manager-owned)' <<< "$result"
 rm -f "$home/port-state"
-result="$(CBM_FAKE_PORT_MODE=cbm-transient CBM_FAKE_PORT_STATE="$home/port-state" run_tool "$home" "$project" "$log" dashboard start --port 9749 --dry-run)"
-grep -q 'waiting briefly' <<< "$result"
-grep -q 'WOULD_START CBM dashboard' <<< "$result"
+result="$(CBM_FAKE_PORT_MODE=cbm-transient CBM_FAKE_PORT_STATE="$home/port-state" run "$home" "$project" "$log" --agent codex)"
+grep -q 'starting a persistent UI session' <<< "$result"
+grep -q 'HTTP readiness: healthy' <<< "$result"
+grep -q 'CBM bootstrap summary:' <<< "$result"
+grep -q 'Starting persistent CBM UI session' "$home/state/dev-agent-config/tools/codebase-memory-mcp/dashboard/dashboard.log"
+run_tool "$home" "$project" "$log" dashboard stop >/dev/null
 if CBM_FAKE_PORT_MODE=unrelated run_tool "$home" "$project" "$log" dashboard start --port 9749 --dry-run > "$SANDBOX/unrelated-port" 2>&1; then
   echo 'Unrelated listener was accepted as a CBM dashboard' >&2; exit 1
 fi
 grep -q 'non-CBM or incompatible process' "$SANDBOX/unrelated-port"
-if CBM_FAKE_PORT_MODE=cbm-timeout run_tool "$home" "$project" "$log" dashboard start --port 9749 --dry-run > "$SANDBOX/cbm-timeout" 2>&1; then
-  echo 'Unhealthy persistent daemon UI did not time out safely' >&2; exit 1
+rm -f "$home/ui-session-started"
+if CBM_FAKE_PORT_MODE=cbm-timeout run_tool "$home" "$project" "$log" dashboard start --port 9749 > "$SANDBOX/cbm-timeout" 2>&1; then
+  echo 'Unhealthy persistent daemon UI was reported ready' >&2; exit 1
 fi
-grep -q 'did not become healthy within 5 seconds' "$SANDBOX/cbm-timeout"
+grep -q 'did not return healthy HTTP HTML' "$SANDBOX/cbm-timeout"
+grep -q 'Starting persistent CBM UI session' "$SANDBOX/cbm-timeout"
 
 [ "$graphify_before" = "$(cksum "$ROOT/scripts/tools/graphify.sh" "$ROOT/tools/graphify/tool.conf" "$ROOT/skills/ponytail/SKILL.md")" ]
 echo 'PASS CBM run: install/adoption, MCP preservation, index freshness, dry-run, dashboard reuse/conflict, isolation'

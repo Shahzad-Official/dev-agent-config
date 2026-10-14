@@ -515,11 +515,14 @@ runner keeps CBM's stdio open and runs in the background on macOS and Linux.
 its coordination daemon, so the UI can remain available while another CBM/MCP
 session is connected; the manager will report this and will not kill a shared
 daemon. After indexing, a short-lived CBM daemon can briefly own the port before
-its UI is ready or the port is released. The manager waits up to five seconds
-only when the listener is confirmed to be the selected CBM binary's internal
-daemon, reuses its UI only after an HTTP/content check, and refuses unrelated or
-unverifiable listeners. Stop the runner before cleaning that project's index or
-removing the binary.
+its UI is ready or the port is released. When the listener is confirmed as the
+selected CBM binary's internal daemon but HTTP is not ready, the manager starts
+its persistent `--ui=true` CBM session so it can join or establish the shared
+daemon; it does not wait for or terminate the short-lived CLI process. Startup
+succeeds only after a healthy HTTP HTML response from a verified CBM listener,
+with a 30-second bound. An unrelated or unverifiable listener is refused.
+Failed startup reports both the manager runner log and CBM's daemon log path.
+Stop the runner before cleaning that project's index or removing the binary.
 
 Persistent dashboard services are optional and require explicit actions. The
 manager creates only its own service definition and refuses pre-existing or
