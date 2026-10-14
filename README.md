@@ -387,10 +387,11 @@ Fresh installation is pinned to the v0.11.0 release in
 platform archive (macOS canonical assets; Linux portable assets) and its release
 `checksums.txt` over HTTPS, verifies SHA-256, streams only the exact executable
 member without extracting arbitrary archive paths, checks its version in staging
-and at the final destination, then activates it. The selected archive hash and
-platform are recorded in local manager metadata. New Codex/OpenCode integrations
-use the stable manager executable link so explicit upgrades continue using the
-active version. `curl` or `wget`, `tar`, a SHA-256 utility
+and at the final destination, then activates it. Installation shows live archive
+download progress and names each verification/activation stage. The selected
+archive hash and platform are recorded in local manager metadata. New
+Codex/OpenCode integrations use the stable manager executable link so explicit
+upgrades continue using the active version. `curl` or `wget`, `tar`, a SHA-256 utility
 (`sha256sum` or macOS `shasum`), and Python 3 for JSON/OpenCode and project
 mapping features are used; no privileged package manager is called.
 
@@ -509,7 +510,15 @@ dev-agent-config tools codebase-memory-mcp watcher set disabled
 ```
 
 The dashboard binds to loopback and prints a project-specific URL. Its managed
-runner keeps CBM's stdio open; stop it before cleaning that project's index or
+runner keeps CBM's stdio open and runs in the background on macOS and Linux.
+`dashboard stop` stops only that manager-owned runner. CBM shares its UI through
+its coordination daemon, so the UI can remain available while another CBM/MCP
+session is connected; the manager will report this and will not kill a shared
+daemon. After indexing, a short-lived CBM daemon can briefly own the port before
+its UI is ready or the port is released. The manager waits up to five seconds
+only when the listener is confirmed to be the selected CBM binary's internal
+daemon, reuses its UI only after an HTTP/content check, and refuses unrelated or
+unverifiable listeners. Stop the runner before cleaning that project's index or
 removing the binary.
 
 Persistent dashboard services are optional and require explicit actions. The

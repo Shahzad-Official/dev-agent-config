@@ -166,12 +166,15 @@ platform_asset() {
 }
 
 download_file() {
-  local url="$1" destination="$2"
+  local url="$1" destination="$2" progress="${3:-0}"
   case "$url" in https://github.com/DeusData/codebase-memory-mcp/*|https://api.github.com/repos/DeusData/codebase-memory-mcp/*) ;; *) die "Refusing non-official download URL: $url" ;; esac
   if command -v curl >/dev/null 2>&1; then
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$destination" "$url"
+    if [ "$progress" = 1 ]; then
+      curl --fail --show-error --location --progress-bar --proto '=https' --proto-redir '=https' --output "$destination" "$url"
+    else curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$destination" "$url"; fi
   elif command -v wget >/dev/null 2>&1; then
-    wget --https-only --quiet --output-document="$destination" "$url"
+    if [ "$progress" = 1 ]; then wget --https-only --show-progress --output-document="$destination" "$url"
+    else wget --https-only --quiet --output-document="$destination" "$url"; fi
   else die 'Install requires curl or wget'; fi
 }
 
@@ -295,8 +298,10 @@ install_version() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   archive="$stage/$asset"; checksums="$stage/checksums.txt"
-  download_file "https://github.com/DeusData/codebase-memory-mcp/releases/download/v$version/$asset" "$archive" || die "Download failed; staging data: $stage"
-  download_file "https://github.com/DeusData/codebase-memory-mcp/releases/download/v$version/checksums.txt" "$checksums" || die "Official release checksum file unavailable; staging data: $stage"
+  say "Downloading official CBM $version release archive..."
+  download_file "https://github.com/DeusData/codebase-memory-mcp/releases/download/v$version/$asset" "$archive" 1 || die "Download failed; staging data: $stage"
+  say 'Downloading official release checksums...'
+  download_file "https://github.com/DeusData/codebase-memory-mcp/releases/download/v$version/checksums.txt" "$checksums" 1 || die "Official release checksum file unavailable; staging data: $stage"
   checksum_size="$(wc -c < "$checksums" | tr -d '[:space:]')"
   [[ "$checksum_size" =~ ^[0-9]+$ ]] && [ "$checksum_size" -le 1048576 ] || die 'Official release checksum file is invalid or too large'
   expected="$(awk -v file="$asset" '
@@ -308,6 +313,7 @@ install_version() {
     }
     END { if (bad || !found) exit 1; print digest }
   ' "$checksums")" || die "Official release checksum missing, invalid, or conflicting for $asset"
+  say 'Verifying release SHA-256...'
   actual="$(sha256_file "$archive")"
   expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
   actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
@@ -318,6 +324,7 @@ install_version() {
   awk '$0 == "codebase-memory-mcp" {count++} END{exit !(count==1)}' "$stage/members.txt" || die 'Release archive must contain exactly one codebase-memory-mcp executable'
   tar -xOzf "$archive" codebase-memory-mcp > "$stage/codebase-memory-mcp" || die 'Could not extract the verified CBM executable'
   chmod 755 "$stage/codebase-memory-mcp"
+  say 'Checking downloaded CBM executable...'
   version_output="$("$stage/codebase-memory-mcp" --version 2>&1)" || die 'Staged CBM executable failed --version'
   case "$version_output" in *"$version"*) ;; *) die "Staged binary version mismatch: expected $version; got $version_output" ;; esac
   actual="$(sha256_file "$stage/codebase-memory-mcp")"
@@ -331,6 +338,7 @@ install_version() {
   case "$version_output" in *"$version"*) ;; *) die "Final-destination CBM version mismatch: expected $version; got $version_output" ;; esac
   old="$(active_version 2>/dev/null || true)"
   [ -n "$old" ] || old=none
+  say 'Activating verified CBM installation...'
   activate_version "$version"
   [ "$old" = none ] || printf 'previous\t%s\nnext\t%s\n' "$old" "$version" > "$TRANSACTION_FILE"
   created_final=0
@@ -1111,6 +1119,97 @@ finally: s.close()
 PY
 }
 
+port_listener_pids() {
+  local port="$1" pids
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk '/^[0-9]+$/ && !seen[$0]++')"
+    [ -n "$pids" ] && { printf '%s\n' "$pids"; return 0; }
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+$/ && !seen[$0]++')"
+    [ -n "$pids" ] && { printf '%s\n' "$pids"; return 0; }
+  fi
+  if [ -r /proc/net/tcp ] && [ -d /proc/self/fd ]; then
+    pids="$(python3 - "$port" <<'PY'
+import os,sys
+target=f"{int(sys.argv[1]):04X}"
+inodes=set()
+try:
+    with open('/proc/net/tcp') as f:
+        for line in f.readlines()[1:]:
+            fields=line.split()
+            if len(fields)>9 and fields[1].rsplit(':',1)[-1].upper()==target and fields[3]=='0A':
+                inodes.add(fields[9])
+except OSError: raise SystemExit(2)
+for pid in os.listdir('/proc'):
+    if not pid.isdigit(): continue
+    try:
+        for fd in os.listdir(f'/proc/{pid}/fd'):
+            try: link=os.readlink(f'/proc/{pid}/fd/{fd}')
+            except OSError: continue
+            if link.startswith('socket:[') and link[8:-1] in inodes:
+                print(pid); break
+    except OSError: continue
+PY
+)" || return 2
+    [ -n "$pids" ] && { printf '%s\n' "$pids" | awk '!seen[$0]++'; return 0; }
+    return 1
+  fi
+  return 1
+}
+
+cbm_daemon_listener() {
+  local pid="$1" binary="$2" command
+  command="$(ps -ww -p "$pid" -o command= 2>/dev/null || ps -p "$pid" -o command= 2>/dev/null || true)"
+  [ -n "$command" ] || return 1
+  case "$command" in *--cbm-daemon-internal*) ;; *) return 1 ;; esac
+  python3 - "$command" "$binary" <<'PY'
+import os,shlex,shutil,sys
+try: args=shlex.split(sys.argv[1])
+except ValueError: raise SystemExit(1)
+if not args or '--cbm-daemon-internal' not in args: raise SystemExit(1)
+expected=os.path.realpath(sys.argv[2])
+executable=args[0]
+if not os.path.isabs(executable): executable=shutil.which(executable) or executable
+raise SystemExit(0 if os.path.realpath(executable)==expected else 1)
+PY
+}
+
+cbm_ui_healthy() {
+  python3 - "$1" <<'PY'
+import http.client,sys
+try:
+    c=http.client.HTTPConnection('127.0.0.1',int(sys.argv[1]),timeout=0.5)
+    c.request('GET','/',headers={'Accept-Encoding':'identity'})
+    r=c.getresponse(); body=r.read(131072)
+    ok=r.status==200 and r.getheader('Content-Type','').lower().startswith('text/html') and bool(body)
+    c.close()
+except Exception: ok=False
+raise SystemExit(0 if ok else 1)
+PY
+}
+
+dashboard_port_kind() {
+  local port="$1" binary="$2" pids pid rc
+  if port_is_free "$port" >/dev/null 2>&1; then printf 'free\n'; return; fi
+  if pids="$(port_listener_pids "$port")"; then :; else
+    rc=$?
+    if [ "$rc" -eq 1 ] && port_is_free "$port" >/dev/null 2>&1; then printf 'free\n'; return; fi
+    printf 'unknown\n'; return
+  fi
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    cbm_daemon_listener "$pid" "$binary" || { printf 'unrelated\n'; return; }
+  done <<< "$pids"
+  if cbm_ui_healthy "$port"; then printf 'healthy\n'; else printf 'starting\n'; fi
+}
+
+dashboard_url_for() {
+  local name="$1" port="$2" encoded
+  encoded="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")"
+  printf 'http://127.0.0.1:%s/?project=%s\n' "$port" "$encoded"
+}
+
 dashboard_pid() {
   [ -f "$DASHBOARD_META" ] && [ ! -L "$DASHBOARD_META" ] || return 1
   awk -F '\t' '$1=="pid"{print $2}' "$DASHBOARD_META"
@@ -1141,8 +1240,20 @@ dashboard_process_args() {
 }
 
 dashboard_status() {
-  local pid nonce port project url
-  if [ ! -e "$DASHBOARD_META" ] && [ ! -L "$DASHBOARD_META" ]; then say 'Dashboard: stopped (no manager-owned process record)'; return; fi
+  local pid nonce port project url binary kind
+  if [ ! -e "$DASHBOARD_META" ] && [ ! -L "$DASHBOARD_META" ]; then
+    binary="$(selected_binary 2>/dev/null || true)"
+    if [ -n "$binary" ]; then
+      kind="$(dashboard_port_kind 9749 "$binary")"
+      case "$kind" in
+        healthy) say 'Dashboard: healthy (shared CBM daemon; not manager-owned)'; say 'Project selection: use the CBM project menu or a project-specific URL' ; say 'URL: http://127.0.0.1:9749'; return ;;
+        starting) say 'Dashboard: compatible CBM daemon is starting on port 9749; HTTP UI is not ready yet'; return ;;
+        unrelated) say 'Dashboard: port 9749 is occupied by a non-CBM or incompatible process'; return ;;
+        unknown) say 'Dashboard: port 9749 is occupied, but its process could not be verified safely'; return ;;
+      esac
+    fi
+    say 'Dashboard: stopped (no manager-owned process record)'; return
+  fi
   [ -f "$DASHBOARD_META" ] && [ ! -L "$DASHBOARD_META" ] || die "Unexpected dashboard process metadata: $DASHBOARD_META"
   grep -qFx $'ownership\tdev-agent-config' "$DASHBOARD_META" || die 'Dashboard process record has unexpected ownership'
   pid="$(dashboard_pid)"; nonce="$(dashboard_nonce)"
@@ -1150,10 +1261,11 @@ dashboard_status() {
   project="$(awk -F '\t' '$1=="project_path"{print $2}' "$DASHBOARD_META")"
   if dashboard_owned_process "$pid" "$nonce"; then
     url="http://127.0.0.1:$port"
-    say "Dashboard: running (manager-owned PID $pid)"
+    say "Dashboard: runner running (manager-owned PID $pid)"
     say "Project: $project"
     say "URL: $url"
-    say "Port listening: $([ "$(port_is_open "$port" >/dev/null 2>&1; echo $?)" -eq 0 ] && printf yes || printf no)"
+    if cbm_ui_healthy "$port"; then say 'CBM UI: healthy'
+    else say 'CBM UI: not responding yet'; fi
   else
     local state=0
     dashboard_process_args "$pid" >/dev/null 2>&1 || state=$?
@@ -1163,7 +1275,7 @@ dashboard_status() {
 }
 
 dashboard_start() {
-  local port=9749 project='' dry=0 arg binary name nonce pid log url encoded
+  local port=9749 project='' dry=0 arg binary name nonce pid log url encoded kind attempt
   while [ "$#" -gt 0 ]; do
     arg="$1"; shift
     case "$arg" in
@@ -1191,7 +1303,39 @@ dashboard_start() {
     dashboard_status >/dev/null
     rm "$DASHBOARD_META"
   fi
-  port_is_free "$port" || die "Port $port is already in use; choose another port"
+  kind="$(dashboard_port_kind "$port" "$binary")"
+  case "$kind" in
+    healthy)
+      url="$(dashboard_url_for "$name" "$port")"
+      say "UNCHANGED: healthy CBM UI is already served by the shared daemon (not manager-owned)"
+      say "URL: $url"
+      return
+      ;;
+    starting)
+      say "CBM's compatible internal daemon is binding port $port; waiting briefly for its UI to become healthy or release the port..."
+      attempt=0
+      while [ "$attempt" -lt 20 ]; do
+        sleep 0.25
+        kind="$(dashboard_port_kind "$port" "$binary")"
+        case "$kind" in
+          free) break ;;
+          healthy)
+            url="$(dashboard_url_for "$name" "$port")"
+            say 'UNCHANGED: CBM UI became healthy on the shared daemon (not manager-owned)'
+            say "URL: $url"
+            return
+            ;;
+          starting) ;;
+          unrelated) die "Port $port changed to an unrelated or incompatible listener while waiting; no process was stopped" ;;
+          *) die "Port $port is occupied but its listener cannot be verified; install lsof/fuser or inspect it manually. Nothing was stopped" ;;
+        esac
+        attempt=$((attempt + 1))
+      done
+      [ "$kind" = free ] || die "CBM's internal daemon kept port $port but its UI did not become healthy within 5 seconds; no process was stopped. Check the CBM daemon log under the selected cache, or retry with --port N after it exits."
+      ;;
+    unrelated) die "Port $port is occupied by a non-CBM or incompatible process; choose another port. Nothing was stopped" ;;
+    unknown) die "Port $port is occupied but its process could not be verified safely; install lsof/fuser or inspect it manually. Nothing was stopped" ;;
+  esac
   url="http://127.0.0.1:$port"
   [ "$dry" -eq 0 ] || { say "WOULD_START CBM dashboard for $project"; say "URL: $url/?project=$encoded"; say "CBM executable: $binary"; return; }
   command -v python3 >/dev/null 2>&1 || die 'Dashboard lifecycle requires Python 3'
@@ -1232,7 +1376,7 @@ dashboard_start() {
 }
 
 dashboard_stop() {
-  local dry="$1" pid nonce
+  local dry="$1" pid nonce port binary kind
   if [ ! -e "$DASHBOARD_META" ] && [ ! -L "$DASHBOARD_META" ]; then say 'UNCHANGED: dashboard is not running'; return; fi
   [ -f "$DASHBOARD_META" ] && [ ! -L "$DASHBOARD_META" ] && grep -qFx $'ownership\tdev-agent-config' "$DASHBOARD_META" || die 'Refusing unexpected dashboard process record'
   pid="$(dashboard_pid)"; nonce="$(dashboard_nonce)"
@@ -1244,6 +1388,8 @@ dashboard_stop() {
     say 'UNCHANGED: dashboard process is already stopped'
     return
   fi
+  port="$(awk -F '\t' '$1=="port"{print $2}' "$DASHBOARD_META")"
+  binary="$(awk -F '\t' '$1=="binary"{print $2}' "$DASHBOARD_META")"
   [ "$dry" -eq 0 ] || { say "WOULD_STOP manager-owned dashboard PID $pid"; return; }
   kill -TERM "$pid" || die "Could not stop manager-owned dashboard PID $pid"
   local attempts=0
@@ -1251,6 +1397,11 @@ dashboard_stop() {
   kill -0 "$pid" 2>/dev/null && die "Dashboard PID $pid did not stop; log: $DASHBOARD_DIR/dashboard.log"
   rm "$DASHBOARD_META"
   say "STOPPED: manager-owned dashboard PID $pid"
+  kind="$(dashboard_port_kind "$port" "$binary")"
+  case "$kind" in
+    healthy) say "The shared CBM daemon still serves the UI on port $port; it was left running because other CBM sessions may depend on it." ;;
+    starting) say "The shared CBM daemon is still releasing port $port; it was left running rather than killed." ;;
+  esac
 }
 
 watcher_status() {
