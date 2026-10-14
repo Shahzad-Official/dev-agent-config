@@ -11,9 +11,12 @@ mkdir -p "$home"
 "$ROOT/dev-agent-config" -h >/dev/null
 grep -q 'graphify <action>' "$SANDBOX/help"
 grep -q 'cli install|uninstall' "$SANDBOX/help"
+grep -q 'codebase-memory-mcp <command>' "$SANDBOX/help"
 "$ROOT/dev-agent-config" graphify --help > "$SANDBOX/graphify-help"
 grep -q 'serve \[--project PATH\]' "$SANDBOX/graphify-help"
 grep -q 'run \[--project PATH\]' "$SANDBOX/graphify-help"
+"$ROOT/dev-agent-config" tools codebase-memory-mcp --help > "$SANDBOX/cbm-help"
+grep -q 'adopt \[--dry-run\]' "$SANDBOX/cbm-help"
 
 HOME="$home" PATH=/usr/bin:/bin "$ROOT/dev-agent-config" cli install --dry-run --bin-dir "$home/bin" > "$SANDBOX/dry"
 [ ! -e "$home/bin/dev-agent-config" ]

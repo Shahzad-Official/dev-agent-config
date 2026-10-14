@@ -23,11 +23,13 @@ Commands:
   uninstall [--apply]                         Remove managed instructions and skills
   benchmark REPOSITORY OUTPUT_DIR             Prepare isolated benchmark fixtures
   tools <tool> <action> [options]             Manage optional tools
+  tools codebase-memory-mcp <command>         Detect/adopt CBM; manage Codex MCP explicitly
   graphify <action> [options]                  Manage Graphify; 'run' prepares and serves a project graph
   cli install|uninstall [options]              Add/remove this command in a user bin directory
   help                                        Show this help
 
 Use 'dev-agent-config graphify --help' for Graphify commands.
+Use 'dev-agent-config tools codebase-memory-mcp --help' for CBM commands.
 The user-level CLI link defaults to ~/.local/bin; this does not edit shell startup files.
 EOF
 }

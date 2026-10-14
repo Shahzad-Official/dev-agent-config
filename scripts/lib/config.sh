@@ -151,6 +151,27 @@ install_skill() {
   CHANGES=$((CHANGES + 1))
 }
 
+install_instruction_link() {
+  local destination="$1" origin="$2" mode="$3" type
+  check_skill_target "$destination"
+  type="$(path_type "$destination")"
+  if [ "$type" = symlink ] && [ "$(readlink "$destination")" = "$origin" ]; then
+    say "UNCHANGED code-intelligence instructions: $destination"
+    return
+  fi
+  if [ "$type" != missing ] && [ "$mode" = merge ]; then
+    say "PRESERVED existing code-intelligence path: $destination"
+    return
+  fi
+  say "$( [ "$DRY" -eq 1 ] && printf WOULD_LINK || printf LINKED ) code-intelligence instructions: $destination"
+  if [ "$DRY" -eq 0 ]; then
+    record_and_prepare "$destination"
+    if [ "$type" != missing ]; then rm -rf "$destination"; fi
+    ln -s "$origin" "$destination"
+  fi
+  CHANGES=$((CHANGES + 1))
+}
+
 finish_transaction() {
   local state="$HOME/.agents/dev-agent-config/last-backup"
   say "Changes: $CHANGES"

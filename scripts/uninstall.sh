@@ -12,6 +12,7 @@ if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --apply ]; }; then fail 'Usag
 check_state_target
 check_instruction_target "$HOME/AGENTS.md"
 check_skill_target "$HOME/.agents/skills/ponytail"
+check_skill_target "$HOME/.agents/instructions/code-intelligence.md"
 check_instruction_target "$HOME/.codex/AGENTS.md"
 check_instruction_target "$HOME/.claude/CLAUDE.md"
 check_skill_target "$HOME/.claude/skills/ponytail"
@@ -57,8 +58,19 @@ remove_skill() {
   fi
 }
 
+remove_instruction_link() {
+  local target="$1" origin="$2"
+  validate_target "$target"
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$origin" ]; then
+    say "$( [ "$DRY" -eq 1 ] && printf WOULD_UNLINK || printf UNLINKED ) code-intelligence instructions: $target"
+    if [ "$DRY" -eq 0 ]; then record_and_prepare "$target"; rm "$target"; fi
+    CHANGES=$((CHANGES + 1))
+  fi
+}
+
 remove_instructions "$HOME/AGENTS.md"
 remove_skill "$HOME/.agents/skills/ponytail" "$ROOT/skills/ponytail"
+remove_instruction_link "$HOME/.agents/instructions/code-intelligence.md" "$ROOT/instructions/code-intelligence.md"
 remove_instructions "$HOME/.codex/AGENTS.md"
 remove_instructions "$HOME/.claude/CLAUDE.md"
 remove_skill "$HOME/.claude/skills/ponytail" "$ROOT/skills/ponytail"

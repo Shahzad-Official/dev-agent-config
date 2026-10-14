@@ -67,6 +67,17 @@ the link, so the repository must stay in its current location.
 Project instruction files are never changed. Agent precedence remains native:
 more specific project instructions can supplement or override these global defaults.
 
+The conditional shared code-intelligence guidance has one canonical source at
+`instructions/code-intelligence.md`. Installation links it to
+`~/.agents/instructions/code-intelligence.md`, and the shared `AGENTS.md` asks
+agents to read that stable path only when structural code exploration is useful.
+The same reference is delivered through each supported agent's existing global
+instruction mechanism; it is not copied into agent-specific files or project
+repositories. A Markdown reference is not treated as automatic loading: the
+instruction explicitly tells the agent to open the shared file when relevant.
+Project-specific `AGENTS.md` precedence remains unchanged; project extensions
+are opt-in and are never created by this installer.
+
 ## Backups and rollback
 
 Every changing install creates a timestamped backup and TSV manifest under:
@@ -364,17 +375,278 @@ HOME and workspace directories. It never copies credentials. For a fair comparis
 The helper prepares environments only. It deliberately does not launch agents,
 authenticate them, execute paid requests, or claim unsupported telemetry.
 
+## Optional Codebase Memory MCP
+
+CBM remains optional and independent of Graphify. Binary files installed by this
+manager live under
+`${XDG_DATA_HOME:-$HOME/.local/share}/dev-agent-config/tools/codebase-memory-mcp/versions/`;
+the active version is exposed through `~/.local/bin/codebase-memory-mcp`.
+Fresh installation is pinned to the v0.11.0 release in
+`tools/codebase-memory-mcp/tool.conf`. Each install downloads the official
+platform archive (macOS canonical assets; Linux portable assets) and its release
+`checksums.txt` over HTTPS, verifies SHA-256, streams only the exact executable
+member without extracting arbitrary archive paths, checks its version in staging
+and at the final destination, then activates it. The selected archive hash and
+platform are recorded in local manager metadata. New Codex/OpenCode integrations
+use the stable manager executable link so explicit upgrades continue using the
+active version. `curl` or `wget`, `tar`, a SHA-256 utility
+(`sha256sum` or macOS `shasum`), and Python 3 for JSON/OpenCode and project
+mapping features are used; no privileged package manager is called.
+
+```bash
+dev-agent-config tools codebase-memory-mcp status
+dev-agent-config tools codebase-memory-mcp verify
+dev-agent-config tools codebase-memory-mcp install --dry-run
+dev-agent-config tools codebase-memory-mcp install
+dev-agent-config tools codebase-memory-mcp check-update
+dev-agent-config tools codebase-memory-mcp upgrade --dry-run
+dev-agent-config tools codebase-memory-mcp upgrade
+dev-agent-config tools codebase-memory-mcp rollback --dry-run
+dev-agent-config tools codebase-memory-mcp rollback
+dev-agent-config tools codebase-memory-mcp remove --dry-run
+dev-agent-config tools codebase-memory-mcp remove
+```
+
+Routine `install` keeps a healthy active manager-owned version; it never
+downgrades or checks for updates. Only `check-update` and explicit `upgrade`
+query GitHub for the latest stable release. Previous manager-owned versions are
+retained for rollback. Removal affects only versions with intact ownership
+metadata and matching binary hashes, plus this manager's executable symlink.
+It preserves external binaries, CBM caches, indexes, MCP configuration, and
+dashboard settings. An external binary is never overwritten or removed.
+`adopt` only records an existing executable as external and does not transfer
+ownership; use it to make the existing installation available to the adapter:
+
+```bash
+dev-agent-config tools codebase-memory-mcp adopt --dry-run
+dev-agent-config tools codebase-memory-mcp adopt
+```
+
+Codex MCP management respects `CODEX_HOME` (default `~/.codex`). When the
+Codex CLI is present, the manager uses its documented MCP commands; without the
+CLI it can add a marked TOML block so the Codex VS Code extension can use the
+same config. OpenCode uses its global JSON config (or `OPENCODE_CONFIG`).
+Both adapters back up the config before writing, preserve unrelated settings,
+and report pre-existing CBM entries as externally managed. Disable removes
+only an unchanged, manager-owned entry. OpenCode JSONC/commented configs are
+left untouched because this small prototype does not parse JSONC.
+
+```bash
+dev-agent-config tools codebase-memory-mcp mcp status codex
+dev-agent-config tools codebase-memory-mcp mcp enable codex --dry-run
+dev-agent-config tools codebase-memory-mcp mcp enable codex
+dev-agent-config tools codebase-memory-mcp mcp disable codex --dry-run
+dev-agent-config tools codebase-memory-mcp mcp disable codex
+dev-agent-config tools codebase-memory-mcp mcp status opencode
+dev-agent-config tools codebase-memory-mcp mcp enable opencode --dry-run
+dev-agent-config tools codebase-memory-mcp mcp enable opencode
+dev-agent-config tools codebase-memory-mcp mcp disable opencode --dry-run
+dev-agent-config tools codebase-memory-mcp mcp disable opencode
+```
+
+Project indexes remain in CBM's own cache, outside the source tree. The manager
+records project mappings only when it can confirm that the index did not exist
+before its explicit `index` command and CBM subsequently reports the exact
+canonical repository path. `clean` refuses external/unmapped projects, changed
+names, unparseable project lists, symlinks, and active dashboards for that
+project; it calls CBM's documented `delete_project` command and verifies the
+result. Project commands default to the current directory only when it is a Git
+repository; otherwise pass `--project PATH`. Explicit paths always win.
+
+```bash
+cd ~/retail-pos-api
+dev-agent-config tools codebase-memory-mcp index
+dev-agent-config tools codebase-memory-mcp status --project "$PWD"
+dev-agent-config tools codebase-memory-mcp refresh --project "$PWD" --dry-run
+dev-agent-config tools codebase-memory-mcp refresh --project "$PWD"
+dev-agent-config tools codebase-memory-mcp clean --project "$PWD" --dry-run
+dev-agent-config tools codebase-memory-mcp clean --project "$PWD"
+dev-agent-config tools codebase-memory-mcp dashboard start --project "$PWD" --port 9749
+dev-agent-config tools codebase-memory-mcp dashboard status
+dev-agent-config tools codebase-memory-mcp dashboard stop --dry-run
+dev-agent-config tools codebase-memory-mcp dashboard stop
+dev-agent-config tools codebase-memory-mcp watcher status
+dev-agent-config tools codebase-memory-mcp watcher set disabled --dry-run
+dev-agent-config tools codebase-memory-mcp watcher set disabled
+```
+
+The dashboard binds to loopback and prints a project-specific URL. Its managed
+runner keeps CBM's stdio open; stop it before cleaning that project's index or
+removing the binary.
+
+Persistent dashboard services are optional and require explicit actions. The
+manager creates only its own service definition and refuses pre-existing or
+modified content:
+
+```bash
+dev-agent-config tools codebase-memory-mcp service install --port 9749 --dry-run
+dev-agent-config tools codebase-memory-mcp service install --port 9749
+dev-agent-config tools codebase-memory-mcp service verify
+dev-agent-config tools codebase-memory-mcp service enable --dry-run
+dev-agent-config tools codebase-memory-mcp service enable
+dev-agent-config tools codebase-memory-mcp service disable --dry-run
+dev-agent-config tools codebase-memory-mcp service disable
+dev-agent-config tools codebase-memory-mcp service remove --dry-run
+dev-agent-config tools codebase-memory-mcp service remove
+```
+
+Linux uses a user systemd unit. `service verify` reports whether lingering is
+enabled; surviving logout requires the explicit host-admin action
+`loginctl enable-linger`, which this manager never performs. macOS uses a
+user LaunchAgent, active in the logged-in GUI session and stopped at logout.
+Services bind through CBM's documented loopback UI. Service management requires
+a manager-owned CBM binary and available `systemctl --user` or `launchctl`;
+other operating systems and unavailable user service managers are unsupported.
+The generated service references this checkout's dashboard runner, so keep the
+checkout at the same path while the service definition is installed.
+
+Watcher controls only read or set CBM's global `watcher_enabled` setting.
+Current upstream documentation distinguishes this from `auto_watch`: an open
+MCP session registers its own project with the background watcher. The manager's
+CLI `index`/`refresh` operation does not prove that registration. Project
+`status` reports CBM's `watch.strategy` when the installed version exposes it;
+this is registration evidence, not proof the poller is healthy. Source-change
+detection and successful reindex after changes remain unverified unless checked
+against live CBM state. The watcher subsystem master setting is read when the
+daemon starts; this manager does not stop or restart CBM's shared daemon.
+
+### Debian clean-room test procedure (documentation only)
+
+This procedure is for a later, separately approved Debian Remote SSH run. It
+first inventories the manually installed executable, Codex registration, and
+service files without printing credentials. Do not reset or remove any of these
+external resources as part of this test. Use a temporary HOME, cache, Codex
+config, and disposable Git repository; never point the test at a real project.
+Do not run it with `HOME`, `CODEX_HOME`, or cache variables pointing at a real
+user home.
+
+```bash
+cd /path/to/dev-agent-config
+REAL_HOME="$HOME"
+REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
+REAL_CBMCACHE_DIR="${CBM_CACHE_DIR:-$REAL_HOME/.cache/codebase-memory-mcp}"
+REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$REAL_HOME/.config}"
+# Read-only inventory: capture paths and ownership/state, not config contents.
+command -v codebase-memory-mcp || true
+codebase-memory-mcp --version 2>/dev/null || true
+dev-agent-config tools codebase-memory-mcp status
+dev-agent-config tools codebase-memory-mcp mcp status codex
+systemctl --user list-unit-files 'dev-agent-config-cbm-dashboard.service' 2>/dev/null || true
+ls -ld "$HOME/.local/bin/codebase-memory-mcp" "$HOME/.local/share/codebase-memory-mcp" 2>/dev/null || true
+
+CBM_TEST_HOME="$(mktemp -d /tmp/dev-agent-config-cbm.XXXXXX)"
+export HOME="$CBM_TEST_HOME"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_STATE_HOME="$HOME/.local/state"
+export XDG_CONFIG_HOME="$HOME/.config"
+export CBM_CACHE_DIR="$HOME/.cache/codebase-memory-mcp"
+export CODEX_HOME="$HOME/.codex"
+mkdir -p "$CODEX_HOME" "$HOME/.config/opencode"
+HOME="$HOME" ./scripts/install.sh --dry-run
+HOME="$HOME" ./scripts/install.sh
+HOME="$HOME" ./scripts/verify.sh
+mkdir -p "$HOME/cbm-fixture"
+git -C "$HOME/cbm-fixture" init
+printf 'export function demo() { return 1; }\n' > "$HOME/cbm-fixture/demo.ts"
+
+./dev-agent-config tools codebase-memory-mcp install --dry-run
+./dev-agent-config tools codebase-memory-mcp install
+./dev-agent-config tools codebase-memory-mcp verify
+./dev-agent-config tools codebase-memory-mcp index --project "$HOME/cbm-fixture"
+./dev-agent-config tools codebase-memory-mcp status --project "$HOME/cbm-fixture"
+CBM_PROJECT_NAME="$(./dev-agent-config tools codebase-memory-mcp status --project "$HOME/cbm-fixture" | sed -n 's/^CBM project: //p')"
+"$HOME/.local/bin/codebase-memory-mcp" cli search_graph --project "$CBM_PROJECT_NAME" --label Function --name-pattern demo --limit 5
+./dev-agent-config tools codebase-memory-mcp mcp enable codex --dry-run
+./dev-agent-config tools codebase-memory-mcp mcp enable codex
+# If an isolated Codex CLI/client is available, connect using this CODEX_HOME
+# and test MCP; do not borrow the real user's credentials or config.
+./dev-agent-config tools codebase-memory-mcp mcp disable codex
+./dev-agent-config tools codebase-memory-mcp dashboard start --project "$HOME/cbm-fixture" --port 19749
+# Open the printed loopback URL or forward port 19749 in VS Code Remote SSH.
+# In a separate terminal, verify the HTTP endpoint:
+curl --fail --silent --show-error http://127.0.0.1:19749/ >/dev/null
+./dev-agent-config tools codebase-memory-mcp dashboard stop
+./dev-agent-config tools codebase-memory-mcp clean --project "$HOME/cbm-fixture" --dry-run
+./dev-agent-config tools codebase-memory-mcp clean --project "$HOME/cbm-fixture"
+./dev-agent-config tools codebase-memory-mcp remove --dry-run
+./dev-agent-config tools codebase-memory-mcp remove
+```
+
+For synchronization, keep an isolated Codex MCP session open for the fixture
+project and inspect `status --project` before and after a harmless fixture-only
+source edit. Record separately the `watch.strategy` registration evidence,
+whether CBM reports source changes, and whether index status changes afterward.
+Do not infer these outcomes from `watcher_enabled` alone.
+
+Only after the clean-room test is reviewed should a separate, explicitly
+approved stage consider the existing installation. Run this backup block in a
+new shell with the normal HOME (not the isolated HOME exported above). It copies
+only configuration files, never project indexes or the full cache:
+
+```bash
+umask 077
+REAL_HOME="$HOME"
+REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
+REAL_CBMCACHE_DIR="${CBM_CACHE_DIR:-$REAL_HOME/.cache/codebase-memory-mcp}"
+REAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$REAL_HOME/.config}"
+PARENT="$REAL_HOME/.local/state/dev-agent-config"
+[ ! -L "$REAL_HOME" ] && [ ! -L "$REAL_HOME/.local" ] && [ ! -L "$REAL_HOME/.local/state" ] && [ ! -L "$PARENT" ]
+mkdir -p "$PARENT"
+BACKUP="$(mktemp -d "$PARENT/cbm-preflight.XXXXXX")"
+chmod 700 "$BACKUP"
+for file in "$REAL_CODEX_HOME/config.toml" \
+  "$REAL_CBMCACHE_DIR/_config.db" \
+  "$REAL_CBMCACHE_DIR/config.json" \
+  "$REAL_XDG_CONFIG_HOME/systemd/user/dev-agent-config-cbm-dashboard.service" \
+  "$REAL_HOME/Library/LaunchAgents/org.dev-agent-config.cbm-dashboard.plist"; do
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    relative="${file#"$REAL_HOME"/}"
+    case "$relative" in /*) relative="external/${file#/}" ;; esac
+    mkdir -p "$BACKUP/$(dirname "$relative")"
+    cp -p "$file" "$BACKUP/$relative"
+    printf '%s\t%s\n' "$file" "$BACKUP/$relative" >> "$BACKUP/manifest.tsv"
+  fi
+done
+```
+
+Record which binary, MCP entry, cache/index, and service definition is external
+versus manager-owned. Do not use this prototype's `remove` or `clean` on any
+external resource. Roll back only by disabling an unchanged manager-owned MCP
+entry or service, removing the disposable test index, and removing
+manager-owned test binaries; restore user-owned files only from the matching
+backup. A real reset of the prior installation requires separate explicit
+approval.
+
+After verifying that `CBM_TEST_HOME` still names the temporary directory
+created above, delete only that directory to discard its isolated cache and
+configs. Do not run the cleanup against your normal HOME:
+
+```bash
+case "$CBM_TEST_HOME" in
+  /tmp/dev-agent-config-cbm.*) [ -d "$CBM_TEST_HOME" ] && [ ! -L "$CBM_TEST_HOME" ] && rm -rf -- "$CBM_TEST_HOME" ;;
+  *) echo "Refusing unexpected test path: $CBM_TEST_HOME" >&2; exit 1 ;;
+esac
+```
+
 ## Development and tests
 
 ```bash
 bash -n dev-agent-config scripts/*.sh scripts/lib/*.sh scripts/tools/*.sh tests/*.sh
-./tests/test_cli.sh
-./tests/test_install.sh
-./tests/test_verify.sh
-./tests/test_tools.sh
-./tests/smoke.sh
+bash tests/test_cli.sh
+bash tests/test_install.sh
+bash tests/test_code_intelligence.sh
+bash tests/test_verify.sh
+bash tests/test_tools.sh
+bash tests/test_cbm.sh
+bash tests/test_cbm_projects.sh
+bash tests/test_cbm_service.sh
+bash tests/smoke.sh
 ```
 
 Tests use temporary HOME directories and remove them afterward. They cover fresh
 installation, merge, replace, adapters, repeated installation, symlink conflicts,
-rollback, uninstall, benchmark isolation, and isolated Graphify tool management.
+rollback, uninstall, benchmark isolation, conditional code-intelligence links,
+CBM install/MCP fixtures, project mapping and cleanup, dashboard ownership and
+port-conflict fixtures, watcher evidence reporting, and isolated Graphify tool management.
+Service-definition tests use fake service-manager commands and do not install
+systemd units, launch agents, or persistent services.

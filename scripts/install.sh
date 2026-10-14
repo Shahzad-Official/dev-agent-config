@@ -17,10 +17,12 @@ done
 
 [ -f "$ROOT/AGENTS.md" ] || fail "Missing canonical AGENTS.md"
 [ -f "$ROOT/skills/ponytail/SKILL.md" ] || fail "Missing Ponytail skill"
+[ -f "$ROOT/instructions/code-intelligence.md" ] || fail "Missing code-intelligence instructions"
 
 # Validate every selected path before making the first change.
 check_instruction_target "$HOME/AGENTS.md"
 check_skill_target "$HOME/.agents/skills/ponytail"
+check_skill_target "$HOME/.agents/instructions/code-intelligence.md"
 check_state_target
 if [ -d "$HOME/.codex" ]; then check_instruction_target "$HOME/.codex/AGENTS.md"; fi
 if [ -d "$HOME/.claude" ]; then check_instruction_target "$HOME/.claude/CLAUDE.md"; check_skill_target "$HOME/.claude/skills/ponytail"; fi
@@ -30,6 +32,7 @@ init_transaction "$MODE" "$DRY"
 
 install_instructions "$HOME/AGENTS.md" "$MODE"
 install_skill "$HOME/.agents/skills/ponytail" "$ROOT/skills/ponytail" "$MODE"
+install_instruction_link "$HOME/.agents/instructions/code-intelligence.md" "$ROOT/instructions/code-intelligence.md" "$MODE"
 
 # A detected config directory is the only opt-in needed for an agent adapter.
 if [ -d "$HOME/.codex" ]; then install_instructions "$HOME/.codex/AGENTS.md" "$MODE"; fi

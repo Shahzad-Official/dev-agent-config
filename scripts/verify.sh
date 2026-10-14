@@ -47,6 +47,18 @@ skill_link_target() {
   if [ -L "$1" ]; then readlink "$1"; else printf ''; fi
 }
 
+code_intelligence_status() {
+  local path="$1"
+  if [ -L "$path" ]; then
+    if [ "$(readlink "$path")" = "$ROOT/instructions/code-intelligence.md" ] && [ -f "$path" ]; then printf healthy
+    elif [ ! -e "$path" ]; then printf broken-link
+    else printf conflicting-link
+    fi
+  elif [ ! -e "$path" ]; then printf missing
+  else printf unmanaged
+  fi
+}
+
 safe_version() {
   local executable="$1" sandbox out err pid count line
   sandbox="$(mktemp -d)"
@@ -232,18 +244,21 @@ emit_unsupported() {
 
 shared_instruction="$HOME/AGENTS.md"
 shared_skill="$HOME/.agents/skills/ponytail"
+shared_code_intelligence="$HOME/.agents/instructions/code-intelligence.md"
 shared_instruction_status="$(instruction_status "$shared_instruction")"
 shared_skill_status="$(skill_status "$shared_skill")"
 shared_skill_target="$(skill_link_target "$shared_skill")"
+shared_code_intelligence_status="$(code_intelligence_status "$shared_code_intelligence")"
 register_extension_directories
 discover_vscode_extensions
-if [ "$shared_instruction_status" != healthy ] || [ "$shared_skill_status" != healthy ]; then FAILED=1; fi
+if [ "$shared_instruction_status" != healthy ] || [ "$shared_skill_status" != healthy ] || [ "$shared_code_intelligence_status" != healthy ]; then FAILED=1; fi
 
 if [ "$JSON" -eq 1 ]; then
   printf '{\n  "operating_system":"%s",\n' "$(json_string "$OS")"
   printf '  "vscode":{"cli_path":"%s","extension_list_status":"%s"},\n' "$(json_string "$VSCODE_CLI")" "$VSCODE_LIST_STATUS"
-  printf '  "shared":{"instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"}},\n' \
-    "$(json_string "$shared_instruction")" "$shared_instruction_status" "$(json_string "$shared_skill")" "$shared_skill_status" "$(json_string "$shared_skill_target")"
+  printf '  "shared":{"instruction":{"path":"%s","status":"%s"},"skill":{"path":"%s","status":"%s","link_target":"%s"},"code_intelligence":{"path":"%s","status":"%s"}},\n' \
+    "$(json_string "$shared_instruction")" "$shared_instruction_status" "$(json_string "$shared_skill")" "$shared_skill_status" "$(json_string "$shared_skill_target")" \
+    "$(json_string "$shared_code_intelligence")" "$shared_code_intelligence_status"
   printf '  "agents":['
 else
   printf 'dev-agent-config verification\n'
@@ -254,6 +269,7 @@ else
   printf '  skill: %s' "$shared_skill"
   [ -z "$shared_skill_target" ] || printf ' -> %s' "$shared_skill_target"
   printf ' [%s]\n' "$shared_skill_status"
+  printf '  code-intelligence instructions: %s [%s]\n' "$shared_code_intelligence" "$shared_code_intelligence_status"
 fi
 
 emit_agent Codex codex "$HOME/.codex" "$HOME/.codex/AGENTS.md" "$shared_skill" openai.chatgpt
