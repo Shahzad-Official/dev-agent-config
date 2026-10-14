@@ -2,8 +2,9 @@
 name: ponytail
 description: >
   Prefer the smallest complete code change for implementation, refactoring,
-  debugging, and code reviews. Use when the task benefits from avoiding
-  unnecessary dependencies or abstractions. Modes: lite, full, ultra.
+  debugging, and reviews of actual or proposed changes. Use when the task benefits
+  from avoiding unnecessary dependencies or abstractions. Do not load solely for
+  read-only architecture investigations. Modes: lite, full, ultra.
 argument-hint: "[lite|full|ultra]"
 license: MIT
 ---

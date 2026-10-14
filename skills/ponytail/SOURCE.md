@@ -1,6 +1,6 @@
 # Ponytail provenance
 
-- Package version: `1.0.0-dev-agent-config`
+- Package version: `1.0.1-dev-agent-config`
 - Source: <https://github.com/dietrichgebert/ponytail>
 - Source relationship: reviewed local adaptation, not an executable upstream checkout
 - License: MIT

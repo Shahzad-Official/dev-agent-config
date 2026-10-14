@@ -1,9 +1,16 @@
 # Code Intelligence
 
-Use Codebase Memory MCP (CBM) when a task benefits from structural exploration
-of a repository: locating symbols, understanding call/dependency relationships,
-or tracing a feature across modules. Start with one or two targeted queries for
-the relevant symbols or relationships; do not request a whole-graph dump.
+For explicit architecture investigations, cross-module tracing, call/dependency
+analysis, or security reviews that require understanding how code paths connect,
+start with one or two targeted Codebase Memory MCP (CBM) graph queries when the
+selected project has a current index and CBM is available. Use the results to
+identify relevant symbols and files, then verify conclusions in source. Do not
+request a whole-graph dump.
+
+For a simple, local change or question whose answer is clear from a small number
+of files, use direct source navigation without invoking CBM. If CBM is unavailable,
+the project is not indexed, or graph results are inconclusive, fall back to targeted
+source search and reads; do not silently create or refresh an index.
 
 Keep retrieval proportional to the task. Avoid repeating equivalent queries,
 pulling large neighborhoods without a concrete question, or reading broad

@@ -21,7 +21,7 @@
 
 ## Skills and precedence
 - Shared skills are installed in ~/.agents/skills/ when supported.
-- When structural codebase exploration would help, read `~/.agents/instructions/code-intelligence.md`; otherwise skip it.
+- For architecture investigations, cross-module tracing, call/dependency analysis, or security reviews that need code-path relationships, read `~/.agents/instructions/code-intelligence.md`; otherwise skip it.
 - Consider the ponytail skill for implementation, refactoring, and review, without forcing it into every prompt.
 - More specific project instructions take precedence over these defaults unless they conflict with higher-priority safety requirements.
 - Follow each agent's native skill discovery behavior; a file link alone does not prove skill activation.

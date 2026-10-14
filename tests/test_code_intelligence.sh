@@ -7,6 +7,7 @@ trap 'rm -rf "$SANDBOX"' EXIT
 HOME="$SANDBOX/home"
 target="$HOME/.agents/instructions/code-intelligence.md"
 source="$ROOT/instructions/code-intelligence.md"
+ponytail="$ROOT/skills/ponytail/SKILL.md"
 mkdir -p "$HOME"
 mkdir -p "$HOME/.codex" "$HOME/.claude" "$HOME/.gemini" "$HOME/.config/opencode"
 
@@ -22,9 +23,19 @@ grep -q 'otherwise skip it' "$HOME/AGENTS.md"
 for instruction_file in "$HOME/.codex/AGENTS.md" "$HOME/.claude/CLAUDE.md" "$HOME/.gemini/GEMINI.md" "$HOME/.config/opencode/AGENTS.md"; do
   grep -qF '~/.agents/instructions/code-intelligence.md' "$instruction_file"
 done
+
+# Structural investigations prefer targeted graph navigation, while simple work
+# and read-only investigations do not force CBM or Ponytail activation.
+grep -q 'explicit architecture investigations, cross-module tracing' "$source"
+grep -q 'one or two targeted' "$source"
+grep -q 'graph queries when the' "$source"
+grep -q 'simple, local change or question' "$source"
+grep -q 'do not silently create or refresh an index' "$source"
+grep -q 'Do not load solely for' "$ponytail"
+grep -q 'read-only architecture investigations' "$ponytail"
 external_project="$SANDBOX/another project"
 mkdir -p "$external_project"
-(cd "$external_project" && [ -f "$HOME/.agents/instructions/code-intelligence.md" ] && grep -q 'Use Codebase Memory MCP' "$HOME/.agents/instructions/code-intelligence.md")
+(cd "$external_project" && [ -f "$HOME/.agents/instructions/code-intelligence.md" ] && grep -q 'Codebase Memory MCP (CBM) graph queries' "$HOME/.agents/instructions/code-intelligence.md")
 HOME="$HOME" "$ROOT/scripts/verify.sh" > "$SANDBOX/verify"
 grep -q 'code-intelligence instructions: .*\[healthy\]' "$SANDBOX/verify"
 json="$(HOME="$HOME" "$ROOT/scripts/verify.sh" --json)"
