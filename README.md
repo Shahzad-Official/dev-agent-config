@@ -26,8 +26,9 @@ Replace mode affects only documented instruction files and the `ponytail` skill
 entry. It does not edit credentials, authentication, model choices, MCP settings,
 session history, JSON/TOML settings, or project-level instructions.
 
-Only agents whose configuration directory already exists are configured. The
-shared `~/AGENTS.md` and `~/.agents/skills/ponytail` entries are always installed.
+Agent-specific targets are installed only when their known configuration
+directory or supported CLI is present. The shared `~/AGENTS.md` and
+`~/.agents/skills/ponytail` entries are always installed.
 Unexpected instruction symlinks and symlinked parent directories are refused.
 
 ## Command-line interface
@@ -63,7 +64,9 @@ the link, so the repository must stay in its current location.
 | Claude Code | `~/.claude/CLAUDE.md` | `~/.claude/skills/ponytail` | Supported |
 | Gemini CLI | `~/.gemini/GEMINI.md` | `~/.gemini/skills/ponytail` | Supported |
 | OpenCode | `~/.config/opencode/AGENTS.md` | `~/.config/opencode/skills/ponytail` | Supported |
-| Cursor, Cline, Antigravity | — | — | Not implemented in this prototype |
+| Cline | `~/.agents/AGENTS.md` | `~/.cline/data/settings/skills/ponytail` | Supported (global rules and skills) |
+| Antigravity | `~/.gemini/GEMINI.md` | `~/.gemini/config/skills/ponytail` | Supported (global rules and skills) |
+| Cursor | — | — | Not implemented |
 
 Project instruction files are never changed. Agent precedence remains native:
 more specific project instructions can supplement or override these global defaults.
@@ -78,6 +81,14 @@ repositories. A Markdown reference is not treated as automatic loading: the
 instruction explicitly tells the agent to open the shared file when relevant.
 Project-specific `AGENTS.md` precedence remains unchanged; project extensions
 are opt-in and are never created by this installer.
+
+Antigravity reads global rules from `~/.gemini/GEMINI.md`, skills from
+`~/.gemini/config/skills/`, and MCP servers from
+`~/.gemini/config/mcp_config.json`. The installer reuses the Gemini-compatible
+rules target and links the existing Ponytail skill source into Antigravity's
+global skill directory. Cline reads shared rules via `~/.agents/AGENTS.md` and
+global skills from `~/.cline/data/settings/skills/`. Neither adapter creates
+project-level files.
 
 ## Backups and rollback
 
@@ -437,10 +448,11 @@ dev-agent-config cbm run
 The run command verifies an existing binary (including an external one), or
 installs the verified pinned release if no binary exists. It merges the global
 shared instructions without touching the project's `AGENTS.md`; configures MCP
-only for detected Codex/OpenCode installations, preserving any external CBM
+only for detected Codex/OpenCode/Antigravity installations, preserving any external CBM
 entry; indexes only when the project is missing; and refreshes only when CBM
 reports a stale state or `--refresh` is explicitly passed. Repeated runs do not
-reinstall or re-index a healthy project. `--agent codex` or `--agent opencode`
+reinstall or re-index a healthy project. `--agent codex`, `--agent opencode`, or
+`--agent antigravity`
 limits MCP setup to that available agent; unsupported/missing agents are never
 configured. Use `--no-mcp` or `--no-dashboard` to skip either action, and
 `--port 8080` to choose a dashboard port.
@@ -448,6 +460,7 @@ configured. Use `--no-mcp` or `--no-dashboard` to skip either action, and
 ```bash
 dev-agent-config cbm run --dry-run --no-mcp --no-dashboard
 dev-agent-config cbm run --agent codex --refresh
+dev-agent-config cbm run --agent antigravity
 dev-agent-config cbm run --no-dashboard
 ```
 
@@ -465,10 +478,12 @@ Codex MCP management respects `CODEX_HOME` (default `~/.codex`). When the
 Codex CLI is present, the manager uses its documented MCP commands; without the
 CLI it can add a marked TOML block so the Codex VS Code extension can use the
 same config. OpenCode uses its global JSON config (or `OPENCODE_CONFIG`).
-Both adapters back up the config before writing, preserve unrelated settings,
-and report pre-existing CBM entries as externally managed. Disable removes
-only an unchanged, manager-owned entry. OpenCode JSONC/commented configs are
-left untouched because this small prototype does not parse JSONC.
+Antigravity uses `~/.gemini/config/mcp_config.json` and can be enabled only with
+a verified manager-owned CBM binary. All these changes preserve unrelated
+servers/settings, back up the config, report external entries without taking
+ownership, and disable only unchanged manager-owned entries. OpenCode JSONC and
+invalid JSON configs are left untouched. Cline's shared rules and skill are
+managed, but its separate MCP settings are not yet managed by this CLI.
 
 ```bash
 dev-agent-config tools codebase-memory-mcp mcp status codex
@@ -481,6 +496,11 @@ dev-agent-config tools codebase-memory-mcp mcp enable opencode --dry-run
 dev-agent-config tools codebase-memory-mcp mcp enable opencode
 dev-agent-config tools codebase-memory-mcp mcp disable opencode --dry-run
 dev-agent-config tools codebase-memory-mcp mcp disable opencode
+dev-agent-config tools codebase-memory-mcp mcp status antigravity
+dev-agent-config tools codebase-memory-mcp mcp enable antigravity --dry-run
+dev-agent-config tools codebase-memory-mcp mcp enable antigravity
+dev-agent-config tools codebase-memory-mcp mcp disable antigravity --dry-run
+dev-agent-config tools codebase-memory-mcp mcp disable antigravity
 ```
 
 Project indexes remain in CBM's own cache, outside the source tree. The manager

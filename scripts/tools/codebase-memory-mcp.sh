@@ -21,6 +21,8 @@ CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CODEX_CONFIG="$CODEX_HOME/config.toml"
 OPENCODE_CONFIG="${OPENCODE_CONFIG:-${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/opencode.json}"
 OPENCODE_OWNERSHIP="$STATE_DIR/opencode-mcp.tsv"
+ANTIGRAVITY_CONFIG="${ANTIGRAVITY_CONFIG:-$HOME/.gemini/config/mcp_config.json}"
+ANTIGRAVITY_OWNERSHIP="$STATE_DIR/antigravity-mcp.tsv"
 DASHBOARD_DIR="$STATE_DIR/dashboard"
 DASHBOARD_META="$DASHBOARD_DIR/process.tsv"
 RUNNER="$ROOT/scripts/tools/cbm-dashboard-runner.py"
@@ -46,9 +48,9 @@ Commands:
   rollback [--dry-run]           Reactivate the previous managed version
   remove [--dry-run]             Remove manager-owned binary files only
   adopt [--dry-run]              Record an existing installation as external
-  mcp status [codex|opencode]    Report MCP registration and ownership
-  mcp enable {codex|opencode} [--dry-run]
-  mcp disable {codex|opencode} [--dry-run]
+  mcp status [codex|opencode|antigravity] Report MCP registration and ownership
+  mcp enable {codex|opencode|antigravity} [--dry-run]
+  mcp disable {codex|opencode|antigravity} [--dry-run]
   index [--project PATH]       Index the selected repository (defaults to valid PWD)
   project status [--project PATH]
   refresh [--project PATH] [--dry-run]
@@ -59,7 +61,7 @@ Commands:
   service install [--port N] [--dry-run]
   service enable|disable|verify|remove [--dry-run]
   watcher status | watcher set {enabled|disabled} [--dry-run]
-  run [--dry-run] [--no-dashboard] [--no-mcp] [--agent codex|opencode] [--refresh] [--port N]
+  run [--dry-run] [--no-dashboard] [--no-mcp] [--agent codex|opencode|antigravity] [--refresh] [--port N]
                                Bootstrap CBM for the current Git repository
 
 Adoption never installs, moves, or owns the CBM binary. MCP changes preserve
@@ -801,6 +803,119 @@ PY
   chmod 600 "$tmp"; mv "$tmp" "$OPENCODE_CONFIG"; rm "$OPENCODE_OWNERSHIP"
   say "DISABLED manager-owned OpenCode MCP '$SERVER_NAME'"
   say "Backup: $backup"
+}
+
+antigravity_entry_fingerprint() {
+  python3 - "$ANTIGRAVITY_CONFIG" <<'PY'
+import json, pathlib, sys
+d=json.loads(pathlib.Path(sys.argv[1]).read_text())
+e=d.get("mcpServers",{}).get("codebase-memory-mcp")
+if e is None: raise SystemExit(1)
+print(json.dumps(e, sort_keys=True, separators=(",",":")))
+PY
+}
+
+is_owned_antigravity_entry() {
+  local current expected
+  [ -f "$ANTIGRAVITY_OWNERSHIP" ] && [ ! -L "$ANTIGRAVITY_OWNERSHIP" ] || return 1
+  current="$(antigravity_entry_fingerprint 2>/dev/null)" || return 1
+  expected="$(awk -F '\t' '$1=="snapshot_cksum"{print $2}' "$ANTIGRAVITY_OWNERSHIP")"
+  [ -n "$expected" ] && [ "$(printf '%s' "$current" | cksum | awk '{print $1 ":" $2}')" = "$expected" ]
+}
+
+antigravity_mcp_status() {
+  if is_owned_antigravity_entry; then say "Antigravity MCP '$SERVER_NAME': enabled (manager-owned, unchanged)"
+  elif [ -e "$ANTIGRAVITY_OWNERSHIP" ] || [ -L "$ANTIGRAVITY_OWNERSHIP" ]; then
+    say "Antigravity MCP '$SERVER_NAME': ownership metadata exists but entry is missing or changed; manual review required"
+  elif [ -f "$ANTIGRAVITY_CONFIG" ] && [ ! -L "$ANTIGRAVITY_CONFIG" ] && command -v python3 >/dev/null 2>&1 && python3 - "$ANTIGRAVITY_CONFIG" <<'PY'
+import json,pathlib,sys
+try: d=json.loads(pathlib.Path(sys.argv[1]).read_text())
+except Exception: raise SystemExit(1)
+raise SystemExit(0 if "codebase-memory-mcp" in d.get("mcpServers",{}) else 1)
+PY
+  then say "Antigravity MCP '$SERVER_NAME': configured (externally managed)"
+  else say "Antigravity MCP '$SERVER_NAME': not registered or config is unsupported/invalid; left untouched"; fi
+  say "Antigravity config: $ANTIGRAVITY_CONFIG"
+}
+
+backup_antigravity_config() {
+  local stamp backup
+  safe_user_path "$ANTIGRAVITY_CONFIG"
+  [ ! -L "$ANTIGRAVITY_CONFIG" ] || die "Refusing symlink Antigravity config: $ANTIGRAVITY_CONFIG"
+  [ ! -e "$ANTIGRAVITY_CONFIG" ] || [ -f "$ANTIGRAVITY_CONFIG" ] || die 'Antigravity config is not a regular file'
+  prepare_state
+  [ ! -L "$BACKUPS" ] || die "Refusing symlink backup directory: $BACKUPS"
+  [ -d "$BACKUPS" ] || mkdir -p "$BACKUPS"
+  stamp="$(date '+%Y%m%dT%H%M%S')-antigravity-$$"; backup="$BACKUPS/$stamp"
+  (umask 077; mkdir "$backup")
+  if [ -f "$ANTIGRAVITY_CONFIG" ]; then cp -p "$ANTIGRAVITY_CONFIG" "$backup/mcp_config.json"; printf 'original\tpresent\npath\t%s\n' "$ANTIGRAVITY_CONFIG" > "$backup/manifest.tsv"
+  else printf 'original\tabsent\npath\t%s\n' "$ANTIGRAVITY_CONFIG" > "$backup/manifest.tsv"; fi
+  printf '%s\n' "$backup"
+}
+
+antigravity_mcp_enable() {
+  local dry="$1" active binary version backup tmp fingerprint mode
+  active="$(active_version 2>/dev/null || true)"
+  [ -n "$active" ] || die 'Antigravity MCP requires a verified manager-owned CBM installation; install CBM first'
+  binary="$(selected_binary)"
+  version="$(version_of "$binary" 2>/dev/null)" || die "Manager-owned CBM failed --version verification: $binary"
+  safe_user_path "$ANTIGRAVITY_CONFIG"
+  [ ! -L "$ANTIGRAVITY_CONFIG" ] || die "Refusing symlink Antigravity config: $ANTIGRAVITY_CONFIG"
+  if is_owned_antigravity_entry; then say "UNCHANGED: Antigravity MCP '$SERVER_NAME' is already enabled and manager-owned"; return; fi
+  if [ -e "$ANTIGRAVITY_OWNERSHIP" ] || [ -L "$ANTIGRAVITY_OWNERSHIP" ]; then die "Stale or unexpected Antigravity ownership metadata: $ANTIGRAVITY_OWNERSHIP"; fi
+  if [ -e "$ANTIGRAVITY_CONFIG" ]; then
+    [ -f "$ANTIGRAVITY_CONFIG" ] || die "Antigravity config is not a regular file: $ANTIGRAVITY_CONFIG"
+    if ! python3 - "$ANTIGRAVITY_CONFIG" >/dev/null 2>&1 <<'PY'
+import json,pathlib,sys
+try: d=json.loads(pathlib.Path(sys.argv[1]).read_text())
+except Exception: raise SystemExit("invalid JSON")
+if "codebase-memory-mcp" in d.get("mcpServers",{}): raise SystemExit("EXTERNAL")
+PY
+    then say "EXTERNAL/UNSUPPORTED: Antigravity CBM entry exists or config is invalid; unchanged"; return; fi
+  fi
+  [ "$dry" -eq 0 ] || { say "WOULD_ENABLE Antigravity MCP '$SERVER_NAME' -> $binary"; say "Config: $ANTIGRAVITY_CONFIG"; return; }
+  backup="$(backup_antigravity_config)"; tmp="$ANTIGRAVITY_CONFIG.tmp.$$"
+  mkdir -p "$(dirname "$ANTIGRAVITY_CONFIG")"
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || die "Refusing pre-existing temporary Antigravity config path: $tmp"
+  python3 - "$ANTIGRAVITY_CONFIG" "$tmp" "$binary" "${CBM_CACHE_DIR:-}" <<'PY'
+import json,pathlib,sys
+src,dst,binary,cache=sys.argv[1:]
+p=pathlib.Path(src)
+d=json.loads(p.read_text()) if p.exists() else {}
+entry={"command":binary,"args":[]}
+if cache: entry["env"]={"CBM_CACHE_DIR":cache}
+d.setdefault("mcpServers",{})["codebase-memory-mcp"]=entry
+pathlib.Path(dst).write_text(json.dumps(d,indent=2)+"\n")
+PY
+  if [ -f "$ANTIGRAVITY_CONFIG" ]; then mode="$(file_mode "$ANTIGRAVITY_CONFIG")"; chmod "$mode" "$tmp"; else chmod 600 "$tmp"; fi
+  mv "$tmp" "$ANTIGRAVITY_CONFIG"
+  fingerprint="$(antigravity_entry_fingerprint)" || die "Antigravity entry was written but could not be verified; backup: $backup"
+  (umask 077; printf 'ownership\tmanager\nversion\t%s\nsnapshot_cksum\t%s\n' "$version" "$(printf '%s' "$fingerprint" | cksum | awk '{print $1 ":" $2}')" > "$ANTIGRAVITY_OWNERSHIP")
+  say "ENABLED Antigravity MCP '$SERVER_NAME' using manager-owned $binary"; say "Backup: $backup"
+}
+
+antigravity_mcp_disable() {
+  local dry="$1" current expected backup tmp
+  if [ ! -e "$ANTIGRAVITY_OWNERSHIP" ] && [ ! -L "$ANTIGRAVITY_OWNERSHIP" ]; then antigravity_mcp_status; return; fi
+  [ -f "$ANTIGRAVITY_OWNERSHIP" ] && [ ! -L "$ANTIGRAVITY_OWNERSHIP" ] || die 'Unexpected Antigravity MCP ownership metadata'
+  current="$(antigravity_entry_fingerprint 2>/dev/null)" || die 'Owned Antigravity MCP entry is missing or config is invalid'
+  expected="$(awk -F '\t' '$1=="snapshot_cksum"{print $2}' "$ANTIGRAVITY_OWNERSHIP")"
+  [ "$(printf '%s' "$current" | cksum | awk '{print $1 ":" $2}')" = "$expected" ] || die 'Refusing to remove modified Antigravity MCP entry'
+  safe_user_path "$ANTIGRAVITY_CONFIG"
+  [ ! -L "$ANTIGRAVITY_CONFIG" ] || die "Refusing symlink Antigravity config: $ANTIGRAVITY_CONFIG"
+  [ "$dry" -eq 0 ] || { say "WOULD_DISABLE manager-owned Antigravity MCP '$SERVER_NAME'"; return; }
+  backup="$(backup_antigravity_config)"; tmp="$ANTIGRAVITY_CONFIG.tmp.$$"
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || die "Refusing pre-existing temporary Antigravity config path: $tmp"
+  python3 - "$ANTIGRAVITY_CONFIG" "$tmp" <<'PY'
+import json,pathlib,sys
+src,dst=sys.argv[1:]
+d=json.loads(pathlib.Path(src).read_text())
+del d["mcpServers"]["codebase-memory-mcp"]
+if not d["mcpServers"]: del d["mcpServers"]
+pathlib.Path(dst).write_text(json.dumps(d,indent=2)+"\n")
+PY
+  chmod "$(file_mode "$ANTIGRAVITY_CONFIG")" "$tmp"; mv "$tmp" "$ANTIGRAVITY_CONFIG"; rm "$ANTIGRAVITY_OWNERSHIP"
+  say "DISABLED manager-owned Antigravity MCP '$SERVER_NAME'"; say "Backup: $backup"
 }
 
 mcp_enable() {
@@ -1623,6 +1738,7 @@ agent_available() {
   case "$1" in
     codex) command -v codex >/dev/null 2>&1 || [ -d "$CODEX_HOME" ] || [ -f "$CODEX_CONFIG" ] ;;
     opencode) command -v opencode >/dev/null 2>&1 || [ -d "$(dirname "$OPENCODE_CONFIG")" ] || [ -f "$OPENCODE_CONFIG" ] ;;
+    antigravity) command -v agy >/dev/null 2>&1 || [ -d "$HOME/.gemini/antigravity" ] || [ -d "$HOME/.gemini/antigravity-cli" ] ;;
     *) return 1 ;;
   esac
 }
@@ -1699,8 +1815,8 @@ cbm_run() {
       --no-mcp) no_mcp=1 ;;
       --refresh) force_refresh=1 ;;
       --agent)
-        [ "$#" -gt 0 ] || die '--agent requires codex or opencode'
-        case "$1" in codex|opencode) ;; *) die "Unsupported CBM MCP agent: $1 (supported: codex, opencode)" ;; esac
+        [ "$#" -gt 0 ] || die '--agent requires codex, opencode, or antigravity'
+        case "$1" in codex|opencode|antigravity) ;; *) die "Unsupported CBM MCP agent: $1 (supported: codex, opencode, antigravity)" ;; esac
         requested+=("$1"); requested_count=$((requested_count + 1)); shift
         ;;
       --port) [ "$#" -gt 0 ] || die '--port requires a number'; port="$1"; shift ;;
@@ -1761,23 +1877,29 @@ cbm_run() {
         candidates+=("$agent"); candidate_count=$((candidate_count + 1))
       done
     else
-      for agent in codex opencode; do
+      for agent in codex opencode antigravity; do
         if agent_available "$agent"; then candidates+=("$agent"); candidate_count=$((candidate_count + 1)); fi
       done
     fi
     if [ "$candidate_count" -eq 0 ]; then
       mcp_summary='no supported agent configuration detected'
-      say "MCP: $mcp_summary; pass --agent codex|opencode to select one, or --no-mcp to skip"
+      say "MCP: $mcp_summary; pass --agent codex|opencode|antigravity to select one, or --no-mcp to skip"
     else
       mcp_summary=''
       for agent in "${candidates[@]}"; do
         if ! agent_available "$agent"; then output="$agent unavailable (not configured/installed); skipped"
         elif [ "$dry" -eq 1 ]; then
-          if [ "$agent" = codex ]; then output="$(mcp_enable --dry-run 2>&1)" || die "Codex MCP preflight failed: $output"
-          else output="$(opencode_mcp_enable 1 2>&1)" || die "OpenCode MCP preflight failed: $output"; fi
+          case "$agent" in
+            codex) output="$(mcp_enable --dry-run 2>&1)" || die "Codex MCP preflight failed: $output" ;;
+            opencode) output="$(opencode_mcp_enable 1 2>&1)" || die "OpenCode MCP preflight failed: $output" ;;
+            antigravity) output="$(antigravity_mcp_enable 1 2>&1)" || die "Antigravity MCP preflight failed: $output" ;;
+          esac
         else
-          if [ "$agent" = codex ]; then output="$(mcp_enable 2>&1)" || die "Codex MCP setup failed: $output"
-          else output="$(opencode_mcp_enable 0 2>&1)" || die "OpenCode MCP setup failed: $output"; fi
+          case "$agent" in
+            codex) output="$(mcp_enable 2>&1)" || die "Codex MCP setup failed: $output" ;;
+            opencode) output="$(opencode_mcp_enable 0 2>&1)" || die "OpenCode MCP setup failed: $output" ;;
+            antigravity) output="$(antigravity_mcp_enable 0 2>&1)" || die "Antigravity MCP setup failed: $output" ;;
+          esac
         fi
         if [ -n "$mcp_summary" ]; then mcp_summary+='; '; fi
         case "$output" in
@@ -1920,13 +2042,14 @@ case "$action" in
     case "$sub" in
       status)
         agent="${1:-codex}"; [ "$#" -le 1 ] || usage 2
-        case "$agent" in codex) mcp_status ;; opencode) opencode_status ;; *) usage 2 ;; esac
+        case "$agent" in codex) mcp_status ;; opencode) opencode_status ;; antigravity) antigravity_mcp_status ;; *) usage 2 ;; esac
         ;;
       enable)
         agent="${1:-}"; shift || true
         case "$agent" in
           codex) mcp_enable "$@" ;;
           opencode) dry=0; for arg in "$@"; do case "$arg" in --dry-run) dry=1 ;; *) usage 2 ;; esac; done; opencode_mcp_enable "$dry" ;;
+          antigravity) dry=0; for arg in "$@"; do case "$arg" in --dry-run) dry=1 ;; *) usage 2 ;; esac; done; antigravity_mcp_enable "$dry" ;;
           *) usage 2 ;;
         esac
         ;;
@@ -1935,6 +2058,7 @@ case "$action" in
         case "$agent" in
           codex) mcp_disable "$@" ;;
           opencode) dry=0; for arg in "$@"; do case "$arg" in --dry-run) dry=1 ;; *) usage 2 ;; esac; done; opencode_mcp_disable "$dry" ;;
+          antigravity) dry=0; for arg in "$@"; do case "$arg" in --dry-run) dry=1 ;; *) usage 2 ;; esac; done; antigravity_mcp_disable "$dry" ;;
           *) usage 2 ;;
         esac
         ;;

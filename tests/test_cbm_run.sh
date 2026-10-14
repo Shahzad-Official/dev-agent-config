@@ -185,6 +185,20 @@ grep -q 'healthy CBM UI is already served by the shared daemon' <<< "$result"
 grep -q 'dashboard: http://127.0.0.1:9749/?project=fresh-app' <<< "$result"
 [ ! -e "$home/state/dev-agent-config/tools/codebase-memory-mcp/dashboard/process.tsv" ]
 
+# The explicit Antigravity selector is routed through the documented global
+# Gemini config path and keeps the existing project index.
+mkdir -p "$home/.gemini/antigravity"
+result="$(run "$home" "$project" "$log" --no-dashboard --agent antigravity)"
+grep -q 'MCP antigravity: ENABLED' <<< "$result"
+grep -q 'Antigravity MCP' <<< "$result"
+[ -f "$home/.gemini/config/mcp_config.json" ]
+python3 - "$home/.gemini/config/mcp_config.json" "$home/data/dev-agent-config/tools/codebase-memory-mcp/versions/0.11.0/codebase-memory-mcp" "$home/isolate/cache" <<'PY'
+import json,pathlib,sys
+d=json.load(open(sys.argv[1])); e=d['mcpServers']['codebase-memory-mcp']
+assert pathlib.Path(e['command']).resolve()==pathlib.Path(sys.argv[2]).resolve()
+assert e['env']['CBM_CACHE_DIR']==sys.argv[3]
+PY
+
 # Dry-run with missing installation performs no writes, downloads, or CBM CLI calls.
 dryhome="$SANDBOX/dry"; dryproject="$SANDBOX/projects/dry"; drylog="$SANDBOX/dry.log"
 mkdir -p "$dryhome/.codex"; make_project "$dryproject"; write_empty_projects "$dryhome"

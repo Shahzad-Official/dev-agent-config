@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 . "$ROOT/scripts/lib/config.sh"
 
 DRY=1
+CLINE_PRESENT=0
+[ -d "$HOME/.cline" ] || [ -d "$HOME/Documents/Cline" ] || [ -L "$HOME/.agents/AGENTS.md" ] || command -v cline >/dev/null 2>&1 && CLINE_PRESENT=1
 [ "${1:-}" = --apply ] && DRY=0
 if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --apply ]; }; then fail 'Usage: uninstall.sh [--apply]'; fi
 
@@ -18,6 +20,11 @@ check_instruction_target "$HOME/.claude/CLAUDE.md"
 check_skill_target "$HOME/.claude/skills/ponytail"
 check_instruction_target "$HOME/.gemini/GEMINI.md"
 check_skill_target "$HOME/.gemini/skills/ponytail"
+check_skill_target "$HOME/.gemini/config/skills/ponytail"
+if [ "$CLINE_PRESENT" -eq 1 ]; then
+  check_skill_target "$HOME/.agents/AGENTS.md"
+  check_skill_target "$HOME/.cline/data/settings/skills/ponytail"
+fi
 check_instruction_target "$HOME/.config/opencode/AGENTS.md"
 check_skill_target "$HOME/.config/opencode/skills/ponytail"
 init_transaction uninstall "$DRY"
@@ -59,10 +66,10 @@ remove_skill() {
 }
 
 remove_instruction_link() {
-  local target="$1" origin="$2"
+  local target="$1" origin="$2" label="${3:-code-intelligence instructions}"
   validate_target "$target"
   if [ -L "$target" ] && [ "$(readlink "$target")" = "$origin" ]; then
-    say "$( [ "$DRY" -eq 1 ] && printf WOULD_UNLINK || printf UNLINKED ) code-intelligence instructions: $target"
+    say "$( [ "$DRY" -eq 1 ] && printf WOULD_UNLINK || printf UNLINKED ) $label: $target"
     if [ "$DRY" -eq 0 ]; then record_and_prepare "$target"; rm "$target"; fi
     CHANGES=$((CHANGES + 1))
   fi
@@ -76,7 +83,12 @@ remove_instructions "$HOME/.claude/CLAUDE.md"
 remove_skill "$HOME/.claude/skills/ponytail" "$ROOT/skills/ponytail"
 remove_instructions "$HOME/.gemini/GEMINI.md"
 remove_skill "$HOME/.gemini/skills/ponytail" "$ROOT/skills/ponytail"
+remove_skill "$HOME/.gemini/config/skills/ponytail" "$ROOT/skills/ponytail"
 remove_instructions "$HOME/.config/opencode/AGENTS.md"
 remove_skill "$HOME/.config/opencode/skills/ponytail" "$ROOT/skills/ponytail"
+if [ "$CLINE_PRESENT" -eq 1 ]; then
+  remove_instruction_link "$HOME/.agents/AGENTS.md" "$HOME/AGENTS.md" 'Cline shared rules'
+  remove_skill "$HOME/.cline/data/settings/skills/ponytail" "$ROOT/skills/ponytail"
+fi
 finish_transaction
 [ "$DRY" -eq 0 ] || say 'Dry run only. Pass --apply to uninstall.'

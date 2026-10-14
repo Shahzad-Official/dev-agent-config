@@ -23,8 +23,8 @@ Commands:
   uninstall [--apply]                         Remove managed instructions and skills
   benchmark REPOSITORY OUTPUT_DIR             Prepare isolated benchmark fixtures
   tools <tool> <action> [options]             Manage optional tools
-  tools codebase-memory-mcp <command>         Detect/adopt CBM; manage Codex MCP explicitly
-  cbm run [--dry-run] [--no-dashboard] [--no-mcp] [--agent codex|opencode] [--refresh]
+  tools codebase-memory-mcp <command>         Detect/adopt CBM; manage supported MCP entries
+  cbm run [--dry-run] [--no-dashboard] [--no-mcp] [--agent codex|opencode|antigravity] [--refresh]
                                                Bootstrap CBM for the current Git project
   graphify <action> [options]                  Manage Graphify; 'run' prepares and serves a project graph
   cli install|uninstall [options]              Add/remove this command in a user bin directory

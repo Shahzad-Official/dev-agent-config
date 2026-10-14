@@ -393,6 +393,46 @@ p=sys.argv[1]; d=json.load(open(p)); d["mcp"]["codebase-memory-mcp"]["command"]=
 PY
 if opencode_run mcp disable opencode >/dev/null 2>&1; then echo 'Modified OpenCode entry removed' >&2; exit 1; fi
 
+# Antigravity's documented global MCP config preserves unrelated values and only
+# removes an unchanged entry with manager ownership evidence.
+antigravity_home="$SANDBOX/antigravity"; mkdir -p "$antigravity_home/.local/share" "$antigravity_home/.local/bin" "$antigravity_home/.gemini/config"
+run_manager "$antigravity_home" install >/dev/null
+printf '{"theme":"preserve","mcpServers":{"other":{"command":"other","args":[]}}}\n' > "$antigravity_home/.gemini/config/mcp_config.json"
+antigravity_run() {
+  HOME="$antigravity_home" XDG_STATE_HOME="$antigravity_home/state" XDG_DATA_HOME="$antigravity_home/.local/share" \
+    ANTIGRAVITY_CONFIG="$antigravity_home/.gemini/config/mcp_config.json" PATH="$fakebin:/usr/bin:/bin" \
+    "$ROOT/scripts/tools.sh" codebase-memory-mcp "$@"
+}
+before="$(cksum "$antigravity_home/.gemini/config/mcp_config.json")"
+antigravity_run mcp enable antigravity --dry-run >/dev/null
+[ "$before" = "$(cksum "$antigravity_home/.gemini/config/mcp_config.json")" ]
+antigravity_run mcp enable antigravity >/dev/null
+result="$(antigravity_run mcp enable antigravity)"; grep -q 'UNCHANGED' <<< "$result"
+result="$(antigravity_run mcp status antigravity)"; grep -q 'manager-owned, unchanged' <<< "$result"
+python3 - "$antigravity_home/.gemini/config/mcp_config.json" "$antigravity_home/.local/share/dev-agent-config/tools/codebase-memory-mcp/versions/0.11.0/codebase-memory-mcp" <<'PY'
+import json,pathlib,sys
+d=json.load(open(sys.argv[1])); e=d['mcpServers']['codebase-memory-mcp']
+assert pathlib.Path(e['command']).resolve()==pathlib.Path(sys.argv[2]).resolve() and e['args']==[] and d['theme']=='preserve' and 'other' in d['mcpServers']
+PY
+antigravity_run mcp disable antigravity --dry-run >/dev/null
+antigravity_run mcp disable antigravity >/dev/null
+python3 - "$antigravity_home/.gemini/config/mcp_config.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d['theme']=='preserve' and 'other' in d['mcpServers'] and 'codebase-memory-mcp' not in d['mcpServers']
+PY
+antigravity_run mcp enable antigravity >/dev/null
+python3 - "$antigravity_home/.gemini/config/mcp_config.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['mcpServers']['codebase-memory-mcp']['command']='/changed'; json.dump(d,open(p,'w'))
+PY
+if antigravity_run mcp disable antigravity >/dev/null 2>&1; then echo 'Modified Antigravity entry removed' >&2; exit 1; fi
+rm "$antigravity_home/state/dev-agent-config/tools/codebase-memory-mcp/antigravity-mcp.tsv"
+before="$(cksum "$antigravity_home/.gemini/config/mcp_config.json")"
+result="$(antigravity_run mcp enable antigravity)"; grep -q EXTERNAL <<< "$result"
+[ "$before" = "$(cksum "$antigravity_home/.gemini/config/mcp_config.json")" ]
+result="$(antigravity_run mcp status antigravity)"; grep -q 'externally managed' <<< "$result"
+
 # Graphify remains independently dispatched and its fixture suite is exercised separately.
 "$ROOT/scripts/tools.sh" codebase-memory-mcp --help >/dev/null
-echo 'PASS CBM: adoption, verified install/update/rollback/remove, Codex/OpenCode MCP ownership and preservation'
+echo 'PASS CBM: adoption, verified install/update/rollback/remove, Codex/OpenCode/Antigravity MCP ownership and preservation'

@@ -18,12 +18,16 @@ assert_not_contains() { ! grep -qF "$2" "$1" || { echo "Unexpected '$2' in $1" >
 
 # Fresh install and all verified instruction adapters.
 home="$(new_home fresh)"
+mkdir -p "$home/.cline"
 HOME="$home" "$ROOT/scripts/install.sh" --dry-run >/dev/null
 [ ! -e "$home/AGENTS.md" ]
 HOME="$home" "$ROOT/scripts/install.sh" >/dev/null
 for file in "$home/AGENTS.md" "$home/.codex/AGENTS.md" "$home/.claude/CLAUDE.md" "$home/.gemini/GEMINI.md" "$home/.config/opencode/AGENTS.md"; do
   assert_contains "$file" 'Preserve established architecture'
 done
+[ "$(readlink "$home/.gemini/config/skills/ponytail")" = "$ROOT/skills/ponytail" ]
+[ "$(readlink "$home/.cline/data/settings/skills/ponytail")" = "$ROOT/skills/ponytail" ]
+[ "$(readlink "$home/.agents/AGENTS.md")" = "$home/AGENTS.md" ]
 HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" >/dev/null
 
 # Merge preserves existing instructions and an existing same-name skill.
@@ -97,6 +101,9 @@ HOME="$home" "$ROOT/scripts/uninstall.sh" --apply >/dev/null
 assert_contains "$home/AGENTS.md" 'Keep this.'
 assert_not_contains "$home/AGENTS.md" '# >>> dev-agent-config managed >>>'
 [ ! -L "$home/.agents/skills/ponytail" ]
+[ ! -e "$home/.gemini/config/skills/ponytail" ]
+[ ! -e "$home/.cline/data/settings/skills/ponytail" ]
+[ ! -e "$home/.agents/AGENTS.md" ]
 uninstall_backup="$(sed -n '1p' "$home/.agents/dev-agent-config/last-backup")"
 HOME="$home" "$ROOT/scripts/rollback.sh" "$uninstall_backup" >/dev/null
 assert_contains "$home/AGENTS.md" '# >>> dev-agent-config managed >>>'

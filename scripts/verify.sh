@@ -23,7 +23,10 @@ json_string() {
 
 instruction_status() {
   local path="$1"
-  if [ -L "$path" ]; then printf symlink
+  if [ -L "$path" ]; then
+    if [ "$path" = "$HOME/.agents/AGENTS.md" ] && [ "$(readlink "$path")" = "$HOME/AGENTS.md" ] &&
+      [ -f "$path" ] && grep -qF '# >>> dev-agent-config managed >>>' "$path" && grep -qF 'Preserve established architecture' "$path"; then printf healthy
+    else printf symlink; fi
   elif [ ! -e "$path" ]; then printf missing
   elif [ ! -f "$path" ]; then printf invalid-type
   elif grep -qF '# >>> dev-agent-config managed >>>' "$path" && grep -qF 'Preserve established architecture' "$path"; then printf healthy
@@ -276,6 +279,8 @@ emit_agent Codex codex "$HOME/.codex" "$HOME/.codex/AGENTS.md" "$shared_skill" o
 emit_agent 'Claude Code' claude "$HOME/.claude" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/skills/ponytail" anthropic.claude-code
 emit_agent 'Gemini CLI' gemini "$HOME/.gemini" "$HOME/.gemini/GEMINI.md" "$HOME/.gemini/skills/ponytail" google.geminicodeassist
 emit_agent OpenCode opencode "$HOME/.config/opencode" "$HOME/.config/opencode/AGENTS.md" "$HOME/.config/opencode/skills/ponytail" ''
+emit_agent Cline cline "$HOME/.cline" "$HOME/.agents/AGENTS.md" "$HOME/.cline/data/settings/skills/ponytail" saoudrizwan.claude-dev
+emit_agent Antigravity agy "$HOME/.gemini/antigravity" "$HOME/.gemini/GEMINI.md" "$HOME/.gemini/config/skills/ponytail" ''
 
 if [ "$JSON" -eq 1 ]; then
   printf '\n  ],\n  "unsupported":['
@@ -283,8 +288,6 @@ else
   printf '\nUnsupported adapters\n'
 fi
 emit_unsupported Cursor cursor "$HOME/.cursor"
-emit_unsupported Cline cline "$HOME/.cline" "$HOME/Documents/Cline"
-emit_unsupported Antigravity antigravity "$HOME/.gemini/antigravity"
 
 if [ "$JSON" -eq 1 ]; then
   printf '\n  ],\n  "runtime_skill_activation":"unverified",\n  "healthy":%s\n}\n' "$( [ "$FAILED" -eq 0 ] && printf true || printf false )"

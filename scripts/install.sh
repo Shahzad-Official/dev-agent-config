@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 MODE=merge
 DRY=0
+CLINE_PRESENT=0
+[ -d "$HOME/.cline" ] || [ -d "$HOME/Documents/Cline" ] || command -v cline >/dev/null 2>&1 && CLINE_PRESENT=1
 for arg in "$@"; do
   case "$arg" in
     --mode=merge) MODE=merge ;;
@@ -27,7 +29,13 @@ check_state_target
 if [ -d "$HOME/.codex" ]; then check_instruction_target "$HOME/.codex/AGENTS.md"; fi
 if [ -d "$HOME/.claude" ]; then check_instruction_target "$HOME/.claude/CLAUDE.md"; check_skill_target "$HOME/.claude/skills/ponytail"; fi
 if [ -d "$HOME/.gemini" ]; then check_instruction_target "$HOME/.gemini/GEMINI.md"; check_skill_target "$HOME/.gemini/skills/ponytail"; fi
+if [ -d "$HOME/.gemini" ]; then check_skill_target "$HOME/.gemini/config/skills/ponytail"; fi
 if [ -d "$HOME/.config/opencode" ]; then check_instruction_target "$HOME/.config/opencode/AGENTS.md"; check_skill_target "$HOME/.config/opencode/skills/ponytail"; fi
+if [ "$CLINE_PRESENT" -eq 1 ]; then
+  # Cline documents ~/.agents/AGENTS.md and ~/.cline global skill storage.
+  check_skill_target "$HOME/.agents/AGENTS.md"
+  check_skill_target "$HOME/.cline/data/settings/skills/ponytail"
+fi
 init_transaction "$MODE" "$DRY"
 
 install_instructions "$HOME/AGENTS.md" "$MODE"
@@ -43,9 +51,15 @@ fi
 if [ -d "$HOME/.gemini" ]; then
   install_instructions "$HOME/.gemini/GEMINI.md" "$MODE"
   install_skill "$HOME/.gemini/skills/ponytail" "$ROOT/skills/ponytail" "$MODE"
+  install_skill "$HOME/.gemini/config/skills/ponytail" "$ROOT/skills/ponytail" "$MODE"
 fi
 if [ -d "$HOME/.config/opencode" ]; then
   install_instructions "$HOME/.config/opencode/AGENTS.md" "$MODE"
   install_skill "$HOME/.config/opencode/skills/ponytail" "$ROOT/skills/ponytail" "$MODE"
+fi
+if [ "$CLINE_PRESENT" -eq 1 ]; then
+  # Cline reads this cross-tool global rules file and its global skills directory.
+  install_instruction_link "$HOME/.agents/AGENTS.md" "$HOME/AGENTS.md" "$MODE" 'Cline shared rules'
+  install_skill "$HOME/.cline/data/settings/skills/ponytail" "$ROOT/skills/ponytail" "$MODE"
 fi
 finish_transaction

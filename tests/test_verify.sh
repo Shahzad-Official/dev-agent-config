@@ -58,6 +58,18 @@ grep -q '"name":"OpenCode","cli":"opencode","installed":true,"version":"opencode
 grep -q '"runtime_skill_activation":"unverified"' "$SANDBOX/mixed.json"
 [ ! -e "$home/version-side-effect" ]
 if command -v python3 >/dev/null 2>&1; then python3 -m json.tool "$SANDBOX/mixed.json" >/dev/null; fi
+grep -q '"name":"Cline"' "$SANDBOX/mixed.json"
+grep -q '"name":"Antigravity"' "$SANDBOX/mixed.json"
+
+# Documented global rules and skill targets are discoverable without claiming
+# runtime activation for either IDE.
+home="$SANDBOX/antigravity-cline"
+mkdir -p "$home/.gemini/antigravity" "$home/.cline"
+HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/install.sh" >/dev/null
+HOME="$home" PATH="$SYSTEM_PATH" "$ROOT/scripts/verify.sh" --json > "$SANDBOX/antigravity-cline.json"
+grep -q '"name":"Cline".*"configuration_health":"healthy"' "$SANDBOX/antigravity-cline.json"
+grep -q '"name":"Antigravity".*"configuration_health":"healthy"' "$SANDBOX/antigravity-cline.json"
+grep -q '"runtime_skill_activation":"unverified"' "$SANDBOX/antigravity-cline.json"
 
 # Codex CLI and VS Code extension installation are independent signals.
 home="$SANDBOX/discovery-home"

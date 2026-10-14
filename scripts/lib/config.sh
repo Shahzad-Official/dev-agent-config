@@ -152,18 +152,18 @@ install_skill() {
 }
 
 install_instruction_link() {
-  local destination="$1" origin="$2" mode="$3" type
+  local destination="$1" origin="$2" mode="$3" label="${4:-code-intelligence instructions}" type
   check_skill_target "$destination"
   type="$(path_type "$destination")"
   if [ "$type" = symlink ] && [ "$(readlink "$destination")" = "$origin" ]; then
-    say "UNCHANGED code-intelligence instructions: $destination"
+    say "UNCHANGED $label: $destination"
     return
   fi
   if [ "$type" != missing ] && [ "$mode" = merge ]; then
-    say "PRESERVED existing code-intelligence path: $destination"
+    say "PRESERVED existing instruction link path: $destination"
     return
   fi
-  say "$( [ "$DRY" -eq 1 ] && printf WOULD_LINK || printf LINKED ) code-intelligence instructions: $destination"
+  say "$( [ "$DRY" -eq 1 ] && printf WOULD_LINK || printf LINKED ) $label: $destination"
   if [ "$DRY" -eq 0 ]; then
     record_and_prepare "$destination"
     if [ "$type" != missing ]; then rm -rf "$destination"; fi
